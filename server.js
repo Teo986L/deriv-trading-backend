@@ -38,22 +38,21 @@ app.use(cors({
 }));
 
 app.use(express.json());
+app.set('trust proxy', 1); // ✅ IMPORTANTE: resolver aviso do rate limit
 
 // ========== CONFIGURAÇÃO DO REDIS ==========
 let redisClient = null;
 
-// TTL (tempo de vida) em segundos para cada timeframe
 const TTL_BY_TIMEFRAME = {
-  'M1': 30,   // 30 segundos
-  'M5': 60,   // 1 minuto
-  'M15': 120, // 2 minutos
-  'M30': 180, // 3 minutos
-  'H1': 300,  // 5 minutos
-  'H4': 600,  // 10 minutos
-  'H24': 1800 // 30 minutos
+  'M1': 30,
+  'M5': 60,
+  'M15': 120,
+  'M30': 180,
+  'H1': 300,
+  'H4': 600,
+  'H24': 1800
 };
 
-// Inicializa Redis se a URL estiver configurada
 if (process.env.REDIS_URL) {
   redisClient = createClient({ url: process.env.REDIS_URL });
   redisClient.on('error', (err) => console.error('❌ Redis error:', err));
@@ -67,7 +66,6 @@ if (process.env.REDIS_URL) {
 
 // ========== FUNÇÃO PARA OBTER CANDLES COM CACHE ==========
 async function getCandlesWithCache(client, symbol, tf) {
-  // Se Redis não estiver disponível, busca direto
   if (!redisClient || !redisClient.isReady) {
     return await client.getCandles(symbol, tf.candleCount, tf.seconds);
   }
@@ -75,7 +73,6 @@ async function getCandlesWithCache(client, symbol, tf) {
   const cacheKey = `candles:${symbol}:${tf.key}`;
   
   try {
-    // Tenta obter do cache
     const cached = await redisClient.get(cacheKey);
     
     if (cached) {
@@ -83,18 +80,21 @@ async function getCandlesWithCache(client, symbol, tf) {
       return JSON.parse(cached);
     }
     
-    // Cache miss - busca da Deriv
     console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
     const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
     
-    // Armazena no cache com TTL específico do timeframe
-    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60; // fallback 60s
+    // ✅ VALIDAÇÃO: garantir que é um array
+    if (!Array.isArray(candles)) {
+      console.error(`❌ Resposta inválida da Deriv para ${cacheKey}: não é um array`);
+      return candles; // retorna mesmo assim para o erro ser tratado depois
+    }
+    
+    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
     await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
     
     return candles;
   } catch (error) {
     console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
-    // Em caso de erro no cache, busca direto da Deriv
     return await client.getCandles(symbol, tf.candleCount, tf.seconds);
   }
 }
@@ -253,10 +253,16 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const mtfManager = new MultiTimeframeManager();
     const sistemaBase = new SistemaAnaliseInteligente(symbol);
 
-    // Busca candles para cada timeframe, usando cache quando possível
     const promises = timeframesToAnalyze.map(async (tf) => {
       try {
         const candles = await getCandlesWithCache(client, symbol, tf);
+        
+        // ✅ VALIDAÇÃO CRÍTICA
+        if (!Array.isArray(candles)) {
+          console.error(`❌ Resposta inválida para ${tf.key}: não é um array`, typeof candles);
+          return null;
+        }
+        
         return { key: tf.key, candles };
       } catch (err) {
         console.error(`Erro ao buscar ${tf.key}:`, err.message);
@@ -278,9 +284,13 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         continue;
       }
 
-      const analysis = await sistemaBase.analisar(candles, key);
-      if (analysis && !analysis.erro) {
-        mtfManager.addAnalysis(key, analysis);
+      try {
+        const analysis = await sistemaBase.analisar(candles, key);
+        if (analysis && !analysis.erro) {
+          mtfManager.addAnalysis(key, analysis);
+        }
+      } catch (analysisError) {
+        console.error(`❌ Erro na análise do timeframe ${key}:`, analysisError.message);
       }
     }
 
