@@ -38,7 +38,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
-app.set('trust proxy', 1); // ✅ IMPORTANTE: resolver aviso do rate limit
+app.set('trust proxy', 1); // Resolve aviso do rate limit
 
 // ========== CONFIGURAÇÃO DO REDIS ==========
 let redisClient = null;
@@ -83,10 +83,9 @@ async function getCandlesWithCache(client, symbol, tf) {
     console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
     const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
     
-    // ✅ VALIDAÇÃO: garantir que é um array
     if (!Array.isArray(candles)) {
       console.error(`❌ Resposta inválida da Deriv para ${cacheKey}: não é um array`);
-      return candles; // retorna mesmo assim para o erro ser tratado depois
+      return candles;
     }
     
     const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
@@ -144,15 +143,31 @@ function authenticateToken(req, res, next) {
   return res.status(403).json({ error: 'Token inválido ou expirado' });
 }
 
-// ========== INSTÂNCIA DO CLIENTE DERIV ==========
+// ========== INSTÂNCIA DO CLIENTE DERIV COM CONEXÃO PERSISTENTE ==========
 let derivClient = null;
+let derivConnectionPromise = null;
 
 async function getDerivClient() {
-  if (!derivClient || !derivClient.connected) {
-    derivClient = new DerivClient(API_TOKEN);
-    await derivClient.connect();
+  if (derivConnectionPromise) {
+    return derivConnectionPromise;
   }
-  return derivClient;
+  
+  if (!derivClient) {
+    derivClient = new DerivClient(API_TOKEN);
+  }
+  
+  derivConnectionPromise = derivClient.connect()
+    .then(() => {
+      console.log('✅ Cliente Deriv pronto com conexão persistente');
+      return derivClient;
+    })
+    .catch(err => {
+      console.error('❌ Falha na conexão persistente:', err);
+      derivConnectionPromise = null;
+      throw err;
+    });
+  
+  return derivConnectionPromise;
 }
 
 // ========== ROTAS PÚBLICAS ==========
@@ -230,6 +245,14 @@ app.post('/api/admin/generate-token', adminLimiter, (req, res) => {
   });
 });
 
+// ========== ROTA PARA VERIFICAR STATUS DA CONEXÃO (DEBUG) ==========
+app.get('/api/connection-status', authenticateToken, (req, res) => {
+  if (!derivClient) {
+    return res.json({ status: 'not_initialized' });
+  }
+  res.json(derivClient.getConnectionStatus());
+});
+
 // ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   try {
@@ -257,7 +280,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       try {
         const candles = await getCandlesWithCache(client, symbol, tf);
         
-        // ✅ VALIDAÇÃO CRÍTICA
         if (!Array.isArray(candles)) {
           console.error(`❌ Resposta inválida para ${tf.key}: não é um array`, typeof candles);
           return null;
@@ -272,7 +294,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
     const results = await Promise.all(promises);
 
-    // Processa cada resultado
     for (const result of results) {
       if (!result) continue;
       
@@ -356,6 +377,27 @@ app.use((req, res) => {
 
 // ========== INICIALIZAÇÃO DO SERVIDOR ==========
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
+  
+  // Inicia a conexão com a Deriv assim que o servidor subir
+  try {
+    console.log('🔄 Iniciando conexão persistente com a Deriv...');
+    await getDerivClient();
+    console.log('✅ Conexão persistente estabelecida e mantida');
+  } catch (err) {
+    console.error('❌ Falha ao estabelecer conexão persistente:', err);
+  }
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('🛑 Recebido SIGTERM, encerrando conexões...');
+  if (derivClient) {
+    derivClient.disconnect();
+  }
+  if (redisClient) {
+    redisClient.quit();
+  }
+  process.exit(0);
 });
