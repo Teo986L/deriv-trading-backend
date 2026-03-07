@@ -11,7 +11,7 @@ class DerivClient extends EventEmitter {
         this.reqId = 1;
         this.connected = false;
         this.authorized = false;
-        this.pendingRequests = new Map(); // req_id -> { resolve, reject, timeout }
+        this.pendingRequests = new Map();
         this.pingInterval = null;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
@@ -105,7 +105,6 @@ class DerivClient extends EventEmitter {
     }
 
     _handleMessage(msg) {
-        // Resposta de autorização
         if (msg.msg_type === 'authorize') {
             if (!msg.error) {
                 this.authorized = true;
@@ -117,13 +116,10 @@ class DerivClient extends EventEmitter {
             return;
         }
 
-        // Pong
         if (msg.msg_type === 'pong') {
-            // console.log('📥 Pong recebido');
             return;
         }
 
-        // Respostas com req_id
         const reqId = msg.echo_req?.req_id;
         if (reqId && this.pendingRequests.has(reqId)) {
             const { resolve, reject, timeout } = this.pendingRequests.get(reqId);
@@ -148,15 +144,20 @@ class DerivClient extends EventEmitter {
             const timeout = setTimeout(() => {
                 this.pendingRequests.delete(reqId);
                 reject(new Error('Timeout na autorização'));
-            }, 10000);
-            this.pendingRequests.set(reqId, { resolve: (msg) => {
-                if (!msg.error) {
-                    this.authorized = true;
-                    resolve(true);
-                } else {
-                    reject(new Error(msg.error.message));
-                }
-            }, reject, timeout });
+            }, 30000); // ⬅️ AUMENTADO PARA 30 SEGUNDOS
+            
+            this.pendingRequests.set(reqId, { 
+                resolve: (msg) => {
+                    if (!msg.error) {
+                        this.authorized = true;
+                        resolve(true);
+                    } else {
+                        reject(new Error(msg.error.message));
+                    }
+                }, 
+                reject, 
+                timeout 
+            });
             this.ws.send(JSON.stringify(req));
         });
     }
@@ -181,7 +182,22 @@ class DerivClient extends EventEmitter {
                 this.pendingRequests.delete(reqId);
                 reject(new Error(`Timeout na requisição de candles (${symbol}, ${granularity}s)`));
             }, 30000);
-            this.pendingRequests.set(reqId, { resolve, reject, timeout });
+            
+            // ✅ MODIFICADO: extrair msg.candles ao invés de retornar a mensagem completa
+            this.pendingRequests.set(reqId, { 
+                resolve: (msg) => {
+                    if (msg.error) {
+                        reject(new Error(msg.error.message));
+                    } else if (msg.candles && Array.isArray(msg.candles)) {
+                        // ✅ Retorna APENAS o array de candles
+                        resolve(msg.candles);
+                    } else {
+                        reject(new Error('Formato de resposta inválido da Deriv'));
+                    }
+                }, 
+                reject, 
+                timeout 
+            });
             this.ws.send(JSON.stringify(req));
         });
     }
@@ -191,7 +207,6 @@ class DerivClient extends EventEmitter {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 const pingReq = { ping: 1, req_id: this.reqId++ };
                 this.ws.send(JSON.stringify(pingReq));
-                // console.log('📤 Ping enviado');
             }
         }, 30000);
     }
