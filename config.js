@@ -1,7 +1,8 @@
 // config.js
 module.exports = {
     WS_ENDPOINT: "wss://ws.binaryws.com/websockets/v3?app_id=1089",
-    API_TOKEN: "1Jd2sESxdZ24Luv",
+    // ✅ USAR VARIÁVEL DE AMBIENTE (NÃO HARDCODED)
+    API_TOKEN: process.env.API_TOKEN || "1Jd2sESxdZ24Luv", // fallback para desenvolvimento
     CANDLE_COUNT: 300,
 
     INDICATOR_CONFIG: {
@@ -12,8 +13,7 @@ module.exports = {
         MACD_SIGNAL: 9
     },
 
-    // Modos de trading (podem ser sobrescritos via requisição)
-    TRADING_MODE: "CONSERVADOR", // CONSERVADOR, PADRÃO, AGGRESSIVO
+    TRADING_MODE: "CONSERVADOR",
     PROB_BUY_THRESHOLD: 0.55,
     PROB_SELL_THRESHOLD: 0.45,
     MIN_CALL_CONFIRMATIONS: 4,
@@ -61,7 +61,6 @@ module.exports = {
         NONE: "NONE"
     },
 
-    // Configuração por ativo (classe ConfigAtivo)
     ConfigAtivo: {
         getConfig(simbolo) {
             const tipo = this._detectarTipoAtivo(simbolo);
