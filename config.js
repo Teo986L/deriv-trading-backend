@@ -1,7 +1,6 @@
 // config.js
 module.exports = {
     WS_ENDPOINT: "wss://ws.binaryws.com/websockets/v3?app_id=1089",
-    // ✅ USAR VARIÁVEL DE AMBIENTE (NÃO HARDCODED)
     API_TOKEN: process.env.API_TOKEN || "1Jd2sESxdZ24Luv", // fallback para desenvolvimento
     CANDLE_COUNT: 300,
 
@@ -65,10 +64,82 @@ module.exports = {
         getConfig(simbolo) {
             const tipo = this._detectarTipoAtivo(simbolo);
             const configs = {
-                commodity: { nome: 'Commodity', rsi_oversold: 20, rsi_overbought: 80, rsi_extreme_oversold: 12, rsi_extreme_overbought: 88, prob_compra: 0.62, prob_venda: 0.38, peso_tecnica: 0.60, atr_multiplier: 2.5, min_probabilidade: 0.55, tendencia_peso_extra: 1.3, limite_volatilidade_min: 0.03, limite_volatilidade_max: 2.0, usar_adx_corrigido: true, agressividade: 1.2, stop_padrao_pct: 1.2, alvo_moderado_pct: 3.5 },
-                indice_normal: { nome: 'Índice Normal', rsi_oversold: 20, rsi_overbought: 80, rsi_extreme_oversold: 15, rsi_extreme_overbought: 90, prob_compra: 0.60, prob_venda: 0.40, peso_tecnica: 0.60, atr_multiplier: 1.8, min_probabilidade: 0.50, tendencia_peso_extra: 1.2, limite_volatilidade_min: 0.15, limite_volatilidade_max: 2.5, usar_adx_corrigido: true, agressividade: 1.0, stop_padrao_pct: 0.8, alvo_moderado_pct: 2.5 },
-                volatility_index: { nome: 'Volatility Index', rsi_oversold: 20, rsi_overbought: 80, rsi_extreme_oversold: 20, rsi_extreme_overbought: 85, prob_compra: 0.65, prob_venda: 0.35, peso_tecnica: 0.60, atr_multiplier: 2.0, min_probabilidade: 0.48, tendencia_peso_extra: 1.4, limite_volatilidade_min: 0.01, limite_volatilidade_max: 1.0, usar_adx_corrigido: true, agressividade: 1.5, stop_padrao_pct: 0.3, alvo_moderado_pct: 1.0 },
-                criptomoeda: { nome: 'Criptomoeda', rsi_oversold: 20, rsi_overbought: 80, rsi_extreme_oversold: 18, rsi_extreme_overbought: 82, prob_compra: 0.63, prob_venda: 0.37, peso_tecnica: 0.65, atr_multiplier: 2.2, min_probabilidade: 0.52, tendencia_peso_extra: 1.3, limite_volatilidade_min: 0.05, limite_volatilidade_max: 3.0, usar_adx_corrigido: true, agressividade: 1.3, stop_padrao_pct: 0.5, alvo_moderado_pct: 2.0 }
+                commodity: { 
+                    nome: 'Commodity', 
+                    rsi_oversold: 20, 
+                    rsi_overbought: 80, 
+                    rsi_extreme_oversold: 12, 
+                    rsi_extreme_overbought: 88, 
+                    prob_compra: 0.62, 
+                    prob_venda: 0.38, 
+                    peso_tecnica: 0.60, 
+                    atr_multiplier: 2.5, 
+                    min_probabilidade: 0.55, 
+                    tendencia_peso_extra: 1.3, 
+                    limite_volatilidade_min: 0.03, 
+                    limite_volatilidade_max: 2.0, 
+                    usar_adx_corrigido: true, 
+                    agressividade: 1.2, 
+                    stop_padrao_pct: 1.2, 
+                    alvo_moderado_pct: 3.5 
+                },
+                indice_normal: { 
+                    nome: 'Índice Normal', 
+                    rsi_oversold: 20, 
+                    rsi_overbought: 80, 
+                    rsi_extreme_oversold: 15, 
+                    rsi_extreme_overbought: 90, 
+                    prob_compra: 0.60, 
+                    prob_venda: 0.40, 
+                    peso_tecnica: 0.60, 
+                    atr_multiplier: 1.8, 
+                    min_probabilidade: 0.50, 
+                    tendencia_peso_extra: 1.2, 
+                    limite_volatilidade_min: 0.15, 
+                    limite_volatilidade_max: 2.5, 
+                    usar_adx_corrigido: true, 
+                    agressividade: 1.0, 
+                    stop_padrao_pct: 0.8, 
+                    alvo_moderado_pct: 2.5 
+                },
+                volatility_index: { 
+                    nome: 'Volatility Index', 
+                    rsi_oversold: 20, 
+                    rsi_overbought: 80, 
+                    rsi_extreme_oversold: 20, 
+                    rsi_extreme_overbought: 85, 
+                    prob_compra: 0.65, 
+                    prob_venda: 0.35, 
+                    peso_tecnica: 0.60, 
+                    atr_multiplier: 2.0, 
+                    min_probabilidade: 0.48, 
+                    tendencia_peso_extra: 1.4, 
+                    limite_volatilidade_min: 0.01, 
+                    limite_volatilidade_max: 1.0, 
+                    usar_adx_corrigido: true, 
+                    agressividade: 1.5, 
+                    stop_padrao_pct: 0.3, 
+                    alvo_moderado_pct: 1.0 
+                },
+                criptomoeda: { 
+                    nome: 'Criptomoeda', 
+                    rsi_oversold: 20, 
+                    rsi_overbought: 80, 
+                    rsi_extreme_oversold: 18, 
+                    rsi_extreme_overbought: 82, 
+                    prob_compra: 0.63, 
+                    prob_venda: 0.37, 
+                    peso_tecnica: 0.65, 
+                    atr_multiplier: 2.2, 
+                    min_probabilidade: 0.52, 
+                    tendencia_peso_extra: 1.3, 
+                    limite_volatilidade_min: 0.05, 
+                    limite_volatilidade_max: 3.0, 
+                    usar_adx_corrigido: true, 
+                    agressividade: 1.3, 
+                    stop_padrao_pct: 0.5, 
+                    alvo_moderado_pct: 2.0 
+                }
             };
             return configs[tipo] || configs.indice_normal;
         },
