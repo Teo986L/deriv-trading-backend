@@ -253,6 +253,85 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
   res.json(derivClient.getConnectionStatus());
 });
 
+// ========== FUNÇÃO PARA CALCULAR TIMING DE ENTRADA M1 ==========
+function calcularTimingM1(m1Analysis, primarySignal) {
+  // Se não há análise M1 ou sinal principal é HOLD, retorna neutro
+  if (!m1Analysis || primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'M1 não disponível',
+      rsi: m1Analysis?.rsi || null,
+      sinal: m1Analysis?.sinal || null
+    };
+  }
+
+  // Regras de timing baseadas no sinal principal
+  if (primarySignal === 'CALL') {
+    // Para CALL, M1 deve estar em CALL e RSI < 65 (não sobrecomprado)
+    if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65) {
+      return {
+        permitido: true,
+        motivo: 'M1 confirmando CALL',
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal
+      };
+    }
+    // Se M1 está PUT mas RSI oversold, pode ser oportunidade de reversão
+    else if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi < 30) {
+      return {
+        permitido: true,
+        motivo: 'M1 oversold - possível reversão',
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${m1Analysis.rsi?.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal
+      };
+    }
+  }
+  else if (primarySignal === 'PUT') {
+    // Para PUT, M1 deve estar em PUT e RSI > 35 (não sobrevendido)
+    if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35) {
+      return {
+        permitido: true,
+        motivo: 'M1 confirmando PUT',
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal
+      };
+    }
+    // Se M1 está CALL mas RSI overbought, pode ser oportunidade de reversão
+    else if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi > 70) {
+      return {
+        permitido: true,
+        motivo: 'M1 overbought - possível reversão',
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${m1Analysis.rsi?.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal
+      };
+    }
+  }
+
+  // Fallback para qualquer outro caso
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi: m1Analysis.rsi,
+    sinal: m1Analysis.sinal
+  };
+}
+
 // ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   try {
@@ -324,6 +403,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       m5Price
     );
 
+    // ========== CALCULAR TIMING DE ENTRADA M1 ==========
+    const m1Analysis = mtfManager.timeframes['M1']?.analysis;
+    const primarySignal = consolidated.simpleMajority.signal;
+    const m1Timing = calcularTimingM1(m1Analysis, primarySignal);
+
+    // Montar resposta com timing M1
     const response = {
       success: true,
       consolidated: {
@@ -332,7 +417,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         agreement: agreement.agreement,
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
-        sinal_premium: consolidated.sinal_premium || null
+        sinal_premium: consolidated.sinal_premium || null,
+        m1_timing: m1Timing // 👈 NOVO: timing de entrada M1
       },
       agreement: {
         agreement: agreement.agreement,
