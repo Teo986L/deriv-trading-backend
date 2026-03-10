@@ -43,15 +43,15 @@ app.set('trust proxy', 1);
 // ========== CONFIGURAÇÃO DO REDIS (OPCIONAL) ==========
 let redisClient = null;
 
-// 🔥 TTLs ajustados para melhor performance
+// TTLs ajustados para melhor performance
 const TTL_BY_TIMEFRAME = {
-  'M1': 10,      // Reduzido para 10s (dados muito voláteis)
-  'M5': 20,      // Reduzido para 20s
-  'M15': 30,     // Reduzido para 30s
-  'M30': 45,     // Reduzido para 45s
-  'H1': 60,      // Reduzido para 60s
-  'H4': 120,     // Reduzido para 120s
-  'H24': 300     // Reduzido para 300s (5 minutos)
+  'M1': 10,
+  'M5': 20,
+  'M15': 30,
+  'M30': 45,
+  'H1': 60,
+  'H4': 120,
+  'H24': 300
 };
 
 if (process.env.REDIS_URL) {
@@ -100,7 +100,6 @@ const ALL_TIMEFRAMES_CONFIG = {
 
 // ========== FUNÇÃO PARA OBTER CANDLES COM CACHE (COM FALLBACK) ==========
 async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
-  // Se Redis não está disponível ou força dados frescos, busca direto
   if (!redisClient || !redisClient.isReady || forceFresh) {
     console.log(`🔄 Buscando ${tf.key} direto da Deriv (sem cache)`);
     return await client.getCandles(symbol, tf.candleCount, tf.seconds);
@@ -109,15 +108,12 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
   const cacheKey = `candles:${symbol}:${tf.key}`;
   
   try {
-    // Verificar se há dados em cache
     const cached = await redisClient.get(cacheKey);
     
     if (cached) {
-      // Verificar TTL restante
       const ttl = await redisClient.ttl(cacheKey);
       console.log(`✅ Cache hit: ${cacheKey} (TTL: ${ttl}s)`);
       
-      // Se TTL for muito baixo, busca novos dados em background (não bloqueante)
       if (ttl < 5) {
         setTimeout(async () => {
           try {
@@ -144,14 +140,12 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
       return candles;
     }
     
-    // Salvar no cache
     const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
     await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
     
     return candles;
   } catch (error) {
     console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
-    // Fallback: busca direto da Deriv
     return await client.getCandles(symbol, tf.candleCount, tf.seconds);
   }
 }
@@ -326,7 +320,7 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
   res.json(derivClient.getConnectionStatus());
 });
 
-// ========== FUNÇÃO PARA CALCULAR TIMING DE ENTRADA M1 ==========
+// ========== FUNÇÃO PARA CALCULAR TIMING DE ENTRADA M1 (SNIPER) ==========
 function calcularTimingM1(m1Analysis, primarySignal) {
   if (!m1Analysis || primarySignal === 'HOLD') {
     return {
@@ -398,6 +392,124 @@ function calcularTimingM1(m1Analysis, primarySignal) {
   };
 }
 
+// ========== NOVA FUNÇÃO: TIMING DO CAÇADOR (baseado no M5) ==========
+function calcularTimingCacador(m5Analysis, h1Analysis) {
+  if (!m5Analysis || !h1Analysis) {
+    return {
+      permitido: false,
+      motivo: 'Dados insuficientes',
+      rsi: m5Analysis?.rsi || null,
+      adx: m5Analysis?.adx || null
+    };
+  }
+
+  // Regra 1: Mesma direção do H1
+  if (m5Analysis.sinal !== h1Analysis.sinal) {
+    return { 
+      permitido: false, 
+      motivo: `M5 (${m5Analysis.sinal}) contra H1 (${h1Analysis.sinal})`,
+      rsi: m5Analysis.rsi,
+      adx: m5Analysis.adx
+    };
+  }
+
+  // Regra 2: RSI em zona segura
+  if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi > 65) {
+    return { 
+      permitido: false, 
+      motivo: `RSI alto (${m5Analysis.rsi.toFixed(0)}) - sobrecomprado`,
+      rsi: m5Analysis.rsi,
+      adx: m5Analysis.adx
+    };
+  }
+
+  if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi < 35) {
+    return { 
+      permitido: false, 
+      motivo: `RSI baixo (${m5Analysis.rsi.toFixed(0)}) - sobrevendido`,
+      rsi: m5Analysis.rsi,
+      adx: m5Analysis.adx
+    };
+  }
+
+  // Regra 3: ADX mínimo
+  if (m5Analysis.adx < 15) {
+    return { 
+      permitido: false, 
+      motivo: `ADX baixo (${m5Analysis.adx.toFixed(1)}) - sem força`,
+      rsi: m5Analysis.rsi,
+      adx: m5Analysis.adx
+    };
+  }
+
+  // Tudo ok!
+  return {
+    permitido: true,
+    motivo: 'M5 confirmando H1',
+    rsi: m5Analysis.rsi,
+    adx: m5Analysis.adx
+  };
+}
+
+// ========== NOVA FUNÇÃO: TIMING DO PESCADOR (baseado no M15) ==========
+function calcularTimingPescador(m15Analysis, h4Analysis) {
+  if (!m15Analysis || !h4Analysis) {
+    return {
+      permitido: false,
+      motivo: 'Dados insuficientes',
+      rsi: m15Analysis?.rsi || null,
+      adx: m15Analysis?.adx || null
+    };
+  }
+
+  // Regra 1: Mesma direção do H4
+  if (m15Analysis.sinal !== h4Analysis.sinal) {
+    return { 
+      permitido: false, 
+      motivo: `M15 (${m15Analysis.sinal}) contra H4 (${h4Analysis.sinal})`,
+      rsi: m15Analysis.rsi,
+      adx: m15Analysis.adx
+    };
+  }
+
+  // Regra 2: RSI em zona segura
+  if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi > 70) {
+    return { 
+      permitido: false, 
+      motivo: `RSI alto (${m15Analysis.rsi.toFixed(0)}) - sobrecomprado`,
+      rsi: m15Analysis.rsi,
+      adx: m15Analysis.adx
+    };
+  }
+
+  if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi < 30) {
+    return { 
+      permitido: false, 
+      motivo: `RSI baixo (${m15Analysis.rsi.toFixed(0)}) - sobrevendido`,
+      rsi: m15Analysis.rsi,
+      adx: m15Analysis.adx
+    };
+  }
+
+  // Regra 3: ADX mínimo
+  if (m15Analysis.adx < 14) {
+    return { 
+      permitido: false, 
+      motivo: `ADX baixo (${m15Analysis.adx.toFixed(1)}) - sem força`,
+      rsi: m15Analysis.rsi,
+      adx: m15Analysis.adx
+    };
+  }
+
+  // Tudo ok!
+  return {
+    permitido: true,
+    motivo: 'M15 confirmando H4',
+    rsi: m15Analysis.rsi,
+    adx: m15Analysis.adx
+  };
+}
+
 // ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
@@ -427,13 +539,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
     const mtfManager = new MultiTimeframeManager();
     
-    // 🔥 Detectar tipo de ativo para passar ao sistema de análise
+    // Detectar tipo de ativo
     const tipoAtivo = symbol.startsWith('R_') ? 'volatility_index' : 
                      (symbol.includes('frx') ? 'forex' : 'indice_normal');
     
     const sistemaBase = new SistemaAnaliseInteligente(symbol);
     
-    // 🔥 Passar tipo de ativo para o sistema de pesos
     if (sistemaBase.sistemaPesos && sistemaBase.sistemaPesos.setTipoAtivo) {
       sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
     }
@@ -443,9 +554,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       try {
         console.log(`🔍 Analisando ${tf.key}...`);
         
-        // 🔥 Forçar dados frescos para timeframes curtos a cada 2 análises
         const forceFresh = (tf.key === 'M1' || tf.key === 'M5') && (Math.random() > 0.5);
-        
         const candles = await getCandlesWithCache(client, symbol, tf, forceFresh);
         
         if (!Array.isArray(candles)) {
@@ -481,12 +590,30 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       basePrice
     );
 
-    // Calcular timing de entrada M1
+    // ========== CALCULAR TIMINGS ESPECÍFICOS PARA CADA MODO ==========
     let m1Timing = null;
+    let m5Timing = null;
+    let m15Timing = null;
+
+    // Timing do SNIPER (M1)
     if (TRADING_MODES[mode].timeframes.includes('M1')) {
       const m1Analysis = mtfManager.timeframes['M1']?.analysis;
       const primarySignal = consolidated.simpleMajority.signal;
       m1Timing = calcularTimingM1(m1Analysis, primarySignal);
+    }
+
+    // Timing do CAÇADOR (M5)
+    if (mode === 'CAÇADOR') {
+      const m5Analysis = mtfManager.timeframes['M5']?.analysis;
+      const h1Analysis = mtfManager.timeframes['H1']?.analysis;
+      m5Timing = calcularTimingCacador(m5Analysis, h1Analysis);
+    }
+
+    // Timing do PESCADOR (M15)
+    if (mode === 'PESCADOR') {
+      const m15Analysis = mtfManager.timeframes['M15']?.analysis;
+      const h4Analysis = mtfManager.timeframes['H4']?.analysis;
+      m15Timing = calcularTimingPescador(m15Analysis, h4Analysis);
     }
 
     // Montar resposta apenas com os timeframes do modo selecionado
@@ -499,7 +626,11 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
           probabilidade: tfData.analysis.probabilidade,
           adx: tfData.analysis.adx,
           rsi: tfData.analysis.rsi,
-          preco_atual: tfData.analysis.preco_atual
+          preco_atual: tfData.analysis.preco_atual,
+          // Incluir timing específico no timeframe apropriado
+          timing: tfKey === 'M1' ? m1Timing : 
+                  tfKey === 'M5' ? m5Timing : 
+                  tfKey === 'M15' ? m15Timing : null
         };
       }
     });
@@ -516,8 +647,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         agreement: agreement.agreement,
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
-        sinal_premium: consolidated.sinal_premium || null,
-        m1_timing: m1Timing
+        sinal_premium: consolidated.sinal_premium || null
       },
       agreement: {
         agreement: agreement.agreement,
@@ -534,6 +664,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         takeProfit: suggestion.takeProfit
       },
       timeframes: responseTimeframes,
+      // NOVO: Timings específicos por modo
+      timing: {
+        m1: m1Timing,
+        m5: m5Timing,
+        m15: m15Timing
+      },
       metadata: {
         responseTimeMs: responseTime,
         timestamp: new Date().toISOString()
@@ -574,7 +710,6 @@ const server = app.listen(PORT, async () => {
   console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
   console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
   
-  // Inicia a conexão com a Deriv
   try {
     console.log('🔄 Iniciando conexão persistente com a Deriv...');
     await getDerivClient();
