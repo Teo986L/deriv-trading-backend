@@ -5,22 +5,23 @@ class AnaliseVelocidadeIndicadores {
         this.historicoADX = {};
         this.historicoPrecos = {};
         this.maxHistorico = 50;
+        
         this.limiares = {
-            M1: { rsiMaxVariacao: 22, adxMaxVariacao: 18, tempoAnalise: 3 },
-            M5: { rsiMaxVariacao: 18, adxMaxVariacao: 15, tempoAnalise: 4 },
-            M15: { rsiMaxVariacao: 14, adxMaxVariacao: 12, tempoAnalise: 5 },
-            M30: { rsiMaxVariacao: 12, adxMaxVariacao: 10, tempoAnalise: 6 },
-            H1: { rsiMaxVariacao: 10, adxMaxVariacao: 8, tempoAnalise: 8 },
-            H4: { rsiMaxVariacao: 8, adxMaxVariacao: 6, tempoAnalise: 10 },
-            H24: { rsiMaxVariacao: 6, adxMaxVariacao: 4, tempoAnalise: 15 }
+            M1: { rsiMaxVariacao: 30, adxMaxVariacao: 25, tempoAnalise: 3 },
+            M5: { rsiMaxVariacao: 25, adxMaxVariacao: 22, tempoAnalise: 4 },
+            M15: { rsiMaxVariacao: 22, adxMaxVariacao: 18, tempoAnalise: 5 },
+            M30: { rsiMaxVariacao: 18, adxMaxVariacao: 15, tempoAnalise: 6 },
+            H1: { rsiMaxVariacao: 15, adxMaxVariacao: 12, tempoAnalise: 8 },
+            H4: { rsiMaxVariacao: 12, adxMaxVariacao: 10, tempoAnalise: 10 },
+            H24: { rsiMaxVariacao: 10, adxMaxVariacao: 8, tempoAnalise: 15 }
         };
+        
         this.padroesPerigosos = {
             rsiExtremoSaltos: 0,
             adxFalsoRompimento: 0,
             divergenciasVelocidade: 0
         };
         
-        // 🔥 NOVO: Inicializa históricos por timeframe
         this.inicializarHistoricos();
     }
 
@@ -33,7 +34,6 @@ class AnaliseVelocidadeIndicadores {
         });
     }
 
-    // 🔥 NOVO: Compara velocidades entre diferentes timeframes
     compararVelocidadeEntreTimeframes(analisesPorTF) {
         const divergencias = [];
         const alertas = [];
@@ -42,14 +42,12 @@ class AnaliseVelocidadeIndicadores {
             return { divergencias: [], alertas: [], score: 0 };
         }
 
-        // Pega as análises dos principais timeframes
         const h4 = analisesPorTF['H4'];
         const h1 = analisesPorTF['H1'];
         const m30 = analisesPorTF['M30'];
         const m15 = analisesPorTF['M15'];
         const m5 = analisesPorTF['M5'];
 
-        // 🔥 REGRA 1: M5/M15 rápidos mas H1 lento = RUÍDO
         if (m5 && h1) {
             if (m5.severidade > 40 && h1.severidade < 20) {
                 divergencias.push({
@@ -61,7 +59,6 @@ class AnaliseVelocidadeIndicadores {
             }
         }
 
-        // 🔥 REGRA 2: M15 rápido mas H4 lento = CORREÇÃO
         if (m15 && h4) {
             if (m15.severidade > 50 && h4.severidade < 15) {
                 const direcao = this.inferirDirecao(analisesPorTF);
@@ -74,7 +71,6 @@ class AnaliseVelocidadeIndicadores {
             }
         }
 
-        // 🔥 REGRA 3: Aceleração em cascata (todos rápidos)
         const tfsRapidos = [];
         if (m5 && m5.severidade > 45) tfsRapidos.push('M5');
         if (m15 && m15.severidade > 45) tfsRapidos.push('M15');
@@ -84,12 +80,11 @@ class AnaliseVelocidadeIndicadores {
             divergencias.push({
                 tipo: 'CASCATA_ACELERACAO',
                 descricao: `Aceleração em cascata: ${tfsRapidos.join(', ')} - MOMENTUM FORTE`,
-                severidade: 30, // Baixa severidade, é bom sinal
+                severidade: 30,
                 acao: 'MOMENTUM_CONFIRMADO'
             });
         }
 
-        // 🔥 REGRA 4: Divergência de velocidade entre timeframes
         if (m15 && h1 && m30) {
             const m15Veloz = m15.severidade > 40;
             const h1Lento = h1.severidade < 20;
@@ -105,14 +100,12 @@ class AnaliseVelocidadeIndicadores {
             }
         }
 
-        // 🔥 Calcular score de confiança baseado nas divergências
         let score = 100;
         divergencias.forEach(d => {
             score -= d.severidade / 2;
         });
         score = Math.max(30, Math.min(100, score));
 
-        // Gerar alertas
         if (divergencias.length > 0) {
             alertas.push({
                 tipo: 'DIVERGENCIA_VELOCIDADE',
@@ -132,7 +125,6 @@ class AnaliseVelocidadeIndicadores {
         };
     }
 
-    // 🔥 NOVO: Infere direção baseado nos sinais
     inferirDirecao(analisesPorTF) {
         let calls = 0, puts = 0;
         
@@ -143,11 +135,9 @@ class AnaliseVelocidadeIndicadores {
         return calls >= 2 ? 'ALTA' : 'BAIXA';
     }
 
-    // 🔥 VERSÃO MODIFICADA: Agora recebe timeframeKey e armazena por TF
     analisarVelocidade(rsiAtual, adxAtual, precoAtual, timeframeKey, candlesRecentes = []) {
         const limiar = this.limiares[timeframeKey] || this.limiares.M5;
 
-        // Garantir que os históricos para este timeframe existem
         if (!this.historicoRSI[timeframeKey]) this.historicoRSI[timeframeKey] = [];
         if (!this.historicoADX[timeframeKey]) this.historicoADX[timeframeKey] = [];
         if (!this.historicoPrecos[timeframeKey]) this.historicoPrecos[timeframeKey] = [];
@@ -171,7 +161,7 @@ class AnaliseVelocidadeIndicadores {
             fatorConfianca: fatorConfianca,
             recomendacao: recomendacao.acao,
             motivo: recomendacao.motivo,
-            direcao: this.inferirDirecaoLocal(analiseRSI, analiseADX, analisePreco),
+            direcao: 'NEUTRA',
             analises: {
                 rsi: analiseRSI,
                 adx: analiseADX,
@@ -192,11 +182,6 @@ class AnaliseVelocidadeIndicadores {
             timestamp: new Date().toISOString(),
             timeframe: timeframeKey
         };
-    }
-
-    inferirDirecaoLocal(analiseRSI, analiseADX, analisePreco) {
-        // Lógica simples para inferir direção baseada nos indicadores
-        return 'NEUTRA';
     }
 
     analisarVelocidadeRSI(rsiAtual, limiar, timeframeKey) {
@@ -775,6 +760,20 @@ class AnaliseVelocidadeIndicadores {
             'MAIORIA_RAPIDA': '🔍 Maioria dos indicadores rápidos - confirmar em timeframe maior'
         };
         return recomendacoes[classificacao] || '🔍 Analisar manualmente';
+    }
+
+    isVelocidadeAceitavel(timeframeKey, analiseVelocidade) {
+        if (!analiseVelocidade) return true;
+        
+        if (timeframeKey === 'M1' || timeframeKey === 'M5') {
+            return analiseVelocidade.severidade < 60;
+        }
+        
+        if (timeframeKey === 'M15' || timeframeKey === 'M30') {
+            return analiseVelocidade.severidade < 50;
+        }
+        
+        return analiseVelocidade.severidade < 40;
     }
 
     reset() {
