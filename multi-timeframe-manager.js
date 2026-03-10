@@ -13,26 +13,26 @@ class MultiTimeframeManager {
         this.consolidatedSignal = { signal: 'HOLD', confidence: 0, agreement: 0, details: {} };
         this.allAnalyses = {};
         
-        // 🔥 NOVO: Pesos base por timeframe (hierarquia)
+        // Pesos base por timeframe (hierarquia)
         this.TF_BASE_WEIGHT = {
-            'M1': 0.5,
-            'M5': 1.0,
-            'M15': 1.5,
-            'M30': 2.0,
-            'H1': 2.5,
-            'H4': 3.0,
-            'H24': 3.5
+            'M1': 1.0,
+            'M5': 1.5,
+            'M15': 2.0,
+            'M30': 2.5,
+            'H1': 3.0,
+            'H4': 3.5,
+            'H24': 4.0
         };
         
-        // 🔥 NOVO: Limiares de ADX para participação
+        // Limiares de ADX para participação (mais permissivos para ativos voláteis)
         this.ADX_THRESHOLDS = {
-            'M1': { min: 15, ignore_below: 12 },
-            'M5': { min: 15, ignore_below: 12 },
-            'M15': { min: 18, ignore_below: 15 },
-            'M30': { min: 18, ignore_below: 15 },
-            'H1': { min: 15, ignore_below: 12 },
-            'H4': { min: 12, ignore_below: 10 },
-            'H24': { min: 10, ignore_below: 8 }
+            'M1': { min: 12, ignore_below: 8 },
+            'M5': { min: 12, ignore_below: 8 },
+            'M15': { min: 14, ignore_below: 10 },
+            'M30': { min: 14, ignore_below: 10 },
+            'H1': { min: 12, ignore_below: 8 },
+            'H4': { min: 10, ignore_below: 6 },
+            'H24': { min: 8, ignore_below: 5 }
         };
     }
 
@@ -43,7 +43,6 @@ class MultiTimeframeManager {
         }
     }
 
-    // 🔥 NOVO: Calcula peso baseado em ADX e timeframe
     calcularPesoPorTF(timeframeKey, analysis) {
         if (!analysis || !analysis.adx) return 0;
         
@@ -51,39 +50,32 @@ class MultiTimeframeManager {
         const baseWeight = this.TF_BASE_WEIGHT[timeframeKey] || 1.0;
         const thresholds = this.ADX_THRESHOLDS[timeframeKey] || { min: 15, ignore_below: 12 };
         
-        // 🔥 Regra 1: ADX abaixo do mínimo = IGNORAR
         if (adx < thresholds.ignore_below) {
             return 0;
         }
         
-        // 🔥 Regra 2: ADX entre ignore_below e min = peso reduzido
         if (adx < thresholds.min) {
             const factor = (adx - thresholds.ignore_below) / (thresholds.min - thresholds.ignore_below);
             return baseWeight * Math.max(0.3, factor);
         }
         
-        // 🔥 Regra 3: ADX normal (entre min e 30) = peso normal
         if (adx < 30) {
             return baseWeight;
         }
         
-        // 🔥 Regra 4: ADX forte (>30) = peso aumentado
-        const adxMultiplier = 1.0 + (Math.min(adx, 50) - 30) / 20; // Max 2.0 em ADX 50
+        const adxMultiplier = 1.0 + (Math.min(adx, 50) - 30) / 20;
         return baseWeight * Math.min(2.0, adxMultiplier);
     }
 
-    // 🔥 NOVO: Verifica se há divergência perigosa entre timeframes
     detectarDivergencias() {
         const divergencias = [];
         
-        // Pega os sinais dos timeframes principais
         const h4 = this.allAnalyses['H4'];
         const h1 = this.allAnalyses['H1'];
         const m30 = this.allAnalyses['M30'];
         const m15 = this.allAnalyses['M15'];
         const m5 = this.allAnalyses['M5'];
         
-        // Divergência H4 vs H1
         if (h4 && h1 && h4.sinal !== h1.sinal) {
             if (h4.adx >= 20 && h1.adx >= 20) {
                 divergencias.push({
@@ -95,7 +87,6 @@ class MultiTimeframeManager {
             }
         }
         
-        // Divergência H1 vs M15
         if (h1 && m15 && h1.sinal !== m15.sinal) {
             if (h1.adx >= 18 && m15.adx >= 15) {
                 divergencias.push({
@@ -107,7 +98,6 @@ class MultiTimeframeManager {
             }
         }
         
-        // Múltiplos timeframes divergentes
         const sinais = [];
         if (h4) sinais.push({ tf: 'H4', sinal: h4.sinal, adx: h4.adx });
         if (h1) sinais.push({ tf: 'H1', sinal: h1.sinal, adx: h1.adx });
@@ -128,7 +118,6 @@ class MultiTimeframeManager {
         return divergencias;
     }
 
-    // 🔥 NOVO: Calcula o timeframe dominante (maior peso)
     getTimeframeDominante() {
         let maxPeso = 0;
         let dominante = null;
@@ -173,7 +162,6 @@ class MultiTimeframeManager {
         };
     }
 
-    // 🔥 VERSÃO MODIFICADA: Agora usa pesos por ADX
     consolidateSignals() {
         let totalWeight = 0;
         let callWeight = 0;
@@ -187,11 +175,9 @@ class MultiTimeframeManager {
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
             if (!analysis) continue;
             
-            // 🔥 Calcula peso dinâmico baseado em ADX
             const weight = this.calcularPesoPorTF(key, analysis);
             
             if (weight === 0) {
-                // Timeframe ignorado (ADX muito baixo)
                 details[key] = {
                     signal: analysis.sinal,
                     confidence: (analysis.probabilidade * 100).toFixed(1) + '%',
@@ -231,7 +217,6 @@ class MultiTimeframeManager {
             };
         }
 
-        // 🔥 Se nenhum timeframe passou no filtro, usa o que tiver ADX mais alto
         if (totalWeight === 0 && timeframesCount > 0) {
             console.warn("⚠️ Nenhum timeframe com ADX suficiente - usando o melhor disponível");
             return this.consolidateSignalsFallback();
@@ -257,31 +242,23 @@ class MultiTimeframeManager {
             confidence = totalConfidence / (timeframesCount * 100);
         }
 
-        // 🔥 Detectar divergências
         const divergencias = this.detectarDivergencias();
         const timeframeDominante = this.getTimeframeDominante();
 
-        // 🔥 Ajustar confiança com base em divergências
         if (divergencias.length > 0) {
             const severidadeMedia = divergencias.reduce((acc, d) => acc + d.severidade, 0) / divergencias.length;
-            confidence *= (1 - (severidadeMedia / 200)); // Reduz até 50% em caso crítico
+            confidence *= (1 - (severidadeMedia / 200));
         }
 
         const majorityRatio = Math.max(callCount, putCount) / (callCount + putCount + holdCount);
         confidence = confidence * (0.8 + 0.2 * majorityRatio);
         confidence = Math.min(0.95, Math.max(0.05, confidence));
 
-        const avgConfidence = timeframesCount > 0 ? totalConfidence / timeframesCount : 0;
-
         this.consolidatedSignal = {
             signal: primarySignal,
             confidence: confidence,
             agreement: agreement,
             details,
-            avgConfidence,
-            callWeight: callWeight.toFixed(2),
-            putWeight: putWeight.toFixed(2),
-            totalWeight,
             timeframesAnalyzed: timeframesCount,
             simpleMajority: {
                 signal: primarySignal,
@@ -290,7 +267,6 @@ class MultiTimeframeManager {
                 holdCount
             },
             allAnalyses: this.allAnalyses,
-            // 🔥 NOVOS CAMPOS
             divergencias: divergencias,
             timeframeDominante: timeframeDominante,
             recomendacao: divergencias.length > 1 ? 'AGUARDAR' : 
@@ -300,7 +276,6 @@ class MultiTimeframeManager {
         return this.consolidatedSignal;
     }
 
-    // 🔥 Fallback para quando todos os ADX estão baixos
     consolidateSignalsFallback() {
         let bestTF = null;
         let bestADX = 0;
@@ -315,7 +290,7 @@ class MultiTimeframeManager {
         if (bestTF) {
             return {
                 signal: bestTF.analysis.sinal,
-                confidence: 0.4, // Confiança reduzida
+                confidence: 0.4,
                 agreement: 33,
                 details: { [bestTF.tf]: bestTF.analysis },
                 timeframesAnalyzed: 1,
@@ -341,6 +316,27 @@ class MultiTimeframeManager {
             divergencias: [],
             timeframeDominante: null,
             recomendacao: 'AGUARDAR'
+        };
+    }
+
+    getDiagnostico() {
+        const timeframesAtivos = [];
+        const timeframesIgnorados = [];
+        
+        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
+            const peso = this.calcularPesoPorTF(key, analysis);
+            if (peso > 0) {
+                timeframesAtivos.push({ tf: key, adx: analysis.adx, peso });
+            } else {
+                timeframesIgnorados.push({ tf: key, adx: analysis.adx, motivo: 'ADX baixo' });
+            }
+        }
+        
+        return {
+            timeframesAtivos,
+            timeframesIgnorados,
+            timeframeDominante: this.getTimeframeDominante(),
+            divergencias: this.detectarDivergencias()
         };
     }
 }
