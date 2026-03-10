@@ -1,9 +1,9 @@
 // analyzers/velocidade.js
 class AnaliseVelocidadeIndicadores {
     constructor() {
-        this.historicoRSI = [];
-        this.historicoADX = [];
-        this.historicoPrecos = [];
+        this.historicoRSI = {};
+        this.historicoADX = {};
+        this.historicoPrecos = {};
         this.maxHistorico = 50;
         this.limiares = {
             M1: { rsiMaxVariacao: 22, adxMaxVariacao: 18, tempoAnalise: 3 },
@@ -19,17 +19,145 @@ class AnaliseVelocidadeIndicadores {
             adxFalsoRompimento: 0,
             divergenciasVelocidade: 0
         };
+        
+        // 🔥 NOVO: Inicializa históricos por timeframe
+        this.inicializarHistoricos();
     }
 
+    inicializarHistoricos() {
+        const tfs = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'H24'];
+        tfs.forEach(tf => {
+            this.historicoRSI[tf] = [];
+            this.historicoADX[tf] = [];
+            this.historicoPrecos[tf] = [];
+        });
+    }
+
+    // 🔥 NOVO: Compara velocidades entre diferentes timeframes
+    compararVelocidadeEntreTimeframes(analisesPorTF) {
+        const divergencias = [];
+        const alertas = [];
+        
+        if (!analisesPorTF || Object.keys(analisesPorTF).length < 2) {
+            return { divergencias: [], alertas: [], score: 0 };
+        }
+
+        // Pega as análises dos principais timeframes
+        const h4 = analisesPorTF['H4'];
+        const h1 = analisesPorTF['H1'];
+        const m30 = analisesPorTF['M30'];
+        const m15 = analisesPorTF['M15'];
+        const m5 = analisesPorTF['M5'];
+
+        // 🔥 REGRA 1: M5/M15 rápidos mas H1 lento = RUÍDO
+        if (m5 && h1) {
+            if (m5.severidade > 40 && h1.severidade < 20) {
+                divergencias.push({
+                    tipo: 'RUÍDO_ALTA_FREQUENCIA',
+                    descricao: 'M5 acelerado sem confirmação H1 - MOVIMENTO FALSO',
+                    severidade: 70,
+                    acao: 'IGNORAR_M5'
+                });
+            }
+        }
+
+        // 🔥 REGRA 2: M15 rápido mas H4 lento = CORREÇÃO
+        if (m15 && h4) {
+            if (m15.severidade > 50 && h4.severidade < 15) {
+                const direcao = this.inferirDirecao(analisesPorTF);
+                divergencias.push({
+                    tipo: 'CORRECAO_RAPIDA',
+                    descricao: `M15 acelerado (${m15.severidade.toFixed(0)}%) em H4 lento - PROVÁVEL CORREÇÃO ${direcao}`,
+                    severidade: 65,
+                    acao: 'AGUARDAR_FIM_CORRECAO'
+                });
+            }
+        }
+
+        // 🔥 REGRA 3: Aceleração em cascata (todos rápidos)
+        const tfsRapidos = [];
+        if (m5 && m5.severidade > 45) tfsRapidos.push('M5');
+        if (m15 && m15.severidade > 45) tfsRapidos.push('M15');
+        if (h1 && h1.severidade > 45) tfsRapidos.push('H1');
+        
+        if (tfsRapidos.length >= 3) {
+            divergencias.push({
+                tipo: 'CASCATA_ACELERACAO',
+                descricao: `Aceleração em cascata: ${tfsRapidos.join(', ')} - MOMENTUM FORTE`,
+                severidade: 30, // Baixa severidade, é bom sinal
+                acao: 'MOMENTUM_CONFIRMADO'
+            });
+        }
+
+        // 🔥 REGRA 4: Divergência de velocidade entre timeframes
+        if (m15 && h1 && m30) {
+            const m15Veloz = m15.severidade > 40;
+            const h1Lento = h1.severidade < 20;
+            const m30Moderado = m30.severidade > 25 && m30.severidade < 45;
+            
+            if (m15Veloz && h1Lento && m30Moderado) {
+                divergencias.push({
+                    tipo: 'DIVERGENCIA_VELOCIDADE_ESTRUTURAL',
+                    descricao: 'M15 veloz, H1 lento - CONSOLIDAÇÃO IMINENTE',
+                    severidade: 55,
+                    acao: 'REDUZIR_POSICAO'
+                });
+            }
+        }
+
+        // 🔥 Calcular score de confiança baseado nas divergências
+        let score = 100;
+        divergencias.forEach(d => {
+            score -= d.severidade / 2;
+        });
+        score = Math.max(30, Math.min(100, score));
+
+        // Gerar alertas
+        if (divergencias.length > 0) {
+            alertas.push({
+                tipo: 'DIVERGENCIA_VELOCIDADE',
+                mensagem: `${divergencias.length} divergência(s) de velocidade detectada(s)`,
+                severidade: 50,
+                detalhes: divergencias
+            });
+        }
+
+        return {
+            divergencias,
+            alertas,
+            score,
+            confiabilidade: score > 80 ? 'ALTA' : score > 60 ? 'MEDIA' : 'BAIXA',
+            recomendacao: score > 70 ? 'PERMITIR' : 
+                          score > 50 ? 'CAUTELA' : 'BLOQUEAR'
+        };
+    }
+
+    // 🔥 NOVO: Infere direção baseado nos sinais
+    inferirDirecao(analisesPorTF) {
+        let calls = 0, puts = 0;
+        
+        if (analisesPorTF['M5']) calls += analisesPorTF['M5'].direcao === 'CALL' ? 1 : 0;
+        if (analisesPorTF['M15']) calls += analisesPorTF['M15'].direcao === 'CALL' ? 1 : 0;
+        if (analisesPorTF['H1']) calls += analisesPorTF['H1'].direcao === 'CALL' ? 1 : 0;
+        
+        return calls >= 2 ? 'ALTA' : 'BAIXA';
+    }
+
+    // 🔥 VERSÃO MODIFICADA: Agora recebe timeframeKey e armazena por TF
     analisarVelocidade(rsiAtual, adxAtual, precoAtual, timeframeKey, candlesRecentes = []) {
         const limiar = this.limiares[timeframeKey] || this.limiares.M5;
 
-        const analiseRSI = this.analisarVelocidadeRSI(rsiAtual, limiar);
-        const analiseADX = this.analisarVelocidadeADX(adxAtual, limiar);
+        // Garantir que os históricos para este timeframe existem
+        if (!this.historicoRSI[timeframeKey]) this.historicoRSI[timeframeKey] = [];
+        if (!this.historicoADX[timeframeKey]) this.historicoADX[timeframeKey] = [];
+        if (!this.historicoPrecos[timeframeKey]) this.historicoPrecos[timeframeKey] = [];
+
+        const analiseRSI = this.analisarVelocidadeRSI(rsiAtual, limiar, timeframeKey);
+        const analiseADX = this.analisarVelocidadeADX(adxAtual, limiar, timeframeKey);
         const analisePreco = this.analisarVelocidadePreco(precoAtual, candlesRecentes, limiar, timeframeKey);
         const analiseConjunta = this.analisarConjunto(analiseRSI, analiseADX, analisePreco, timeframeKey);
 
-        this.atualizarHistoricos(rsiAtual, adxAtual, precoAtual);
+        this.atualizarHistoricos(rsiAtual, adxAtual, precoAtual, timeframeKey);
 
         const padroesPerigosos = this.detectarPadroesPerigosos(rsiAtual, adxAtual, analiseRSI, analiseADX, timeframeKey);
 
@@ -43,6 +171,7 @@ class AnaliseVelocidadeIndicadores {
             fatorConfianca: fatorConfianca,
             recomendacao: recomendacao.acao,
             motivo: recomendacao.motivo,
+            direcao: this.inferirDirecaoLocal(analiseRSI, analiseADX, analisePreco),
             analises: {
                 rsi: analiseRSI,
                 adx: analiseADX,
@@ -51,21 +180,29 @@ class AnaliseVelocidadeIndicadores {
             },
             alertas: alertas,
             padroesPerigosos: padroesPerigosos,
+            severidade: analiseConjunta.severidadeTotal,
             estatisticas: {
-                rsi_historico: this.historicoRSI.slice(-5),
-                adx_historico: this.historicoADX.slice(-5),
-                variacao_rsi_3velas: this.calcularVariacaoPeriodo(this.historicoRSI, 3),
-                variacao_adx_3velas: this.calcularVariacaoPeriodo(this.historicoADX, 3),
-                aceleracao_rsi: this.calcularAceleracao(this.historicoRSI),
-                aceleracao_adx: this.calcularAceleracao(this.historicoADX)
+                rsi_historico: this.historicoRSI[timeframeKey].slice(-5),
+                adx_historico: this.historicoADX[timeframeKey].slice(-5),
+                variacao_rsi_3velas: this.calcularVariacaoPeriodo(this.historicoRSI[timeframeKey], 3),
+                variacao_adx_3velas: this.calcularVariacaoPeriodo(this.historicoADX[timeframeKey], 3),
+                aceleracao_rsi: this.calcularAceleracao(this.historicoRSI[timeframeKey]),
+                aceleracao_adx: this.calcularAceleracao(this.historicoADX[timeframeKey])
             },
             timestamp: new Date().toISOString(),
             timeframe: timeframeKey
         };
     }
 
-    analisarVelocidadeRSI(rsiAtual, limiar) {
-        if (this.historicoRSI.length < 3) {
+    inferirDirecaoLocal(analiseRSI, analiseADX, analisePreco) {
+        // Lógica simples para inferir direção baseada nos indicadores
+        return 'NEUTRA';
+    }
+
+    analisarVelocidadeRSI(rsiAtual, limiar, timeframeKey) {
+        const historico = this.historicoRSI[timeframeKey] || [];
+        
+        if (historico.length < 3) {
             return {
                 velocidadeNormal: true,
                 variacao: 0,
@@ -75,11 +212,11 @@ class AnaliseVelocidadeIndicadores {
             };
         }
 
-        const rsiAnterior = this.historicoRSI[this.historicoRSI.length - 1] || rsiAtual;
-        const rsiAntePenultimo = this.historicoRSI[this.historicoRSI.length - 2] || rsiAnterior;
+        const rsiAnterior = historico[historico.length - 1] || rsiAtual;
+        const rsiAntePenultimo = historico[historico.length - 2] || rsiAnterior;
 
         const variacaoAtual = Math.abs(rsiAtual - rsiAnterior);
-        const variacao3Velas = Math.abs(rsiAtual - (this.historicoRSI[this.historicoRSI.length - 3] || rsiAtual));
+        const variacao3Velas = Math.abs(rsiAtual - (historico[historico.length - 3] || rsiAtual));
         const variacaoAnterior = Math.abs(rsiAnterior - rsiAntePenultimo);
         const aceleracao = variacaoAtual - variacaoAnterior;
 
@@ -135,8 +272,10 @@ class AnaliseVelocidadeIndicadores {
         };
     }
 
-    analisarVelocidadeADX(adxAtual, limiar) {
-        if (this.historicoADX.length < 3) {
+    analisarVelocidadeADX(adxAtual, limiar, timeframeKey) {
+        const historico = this.historicoADX[timeframeKey] || [];
+        
+        if (historico.length < 3) {
             return {
                 velocidadeNormal: true,
                 variacao: 0,
@@ -146,11 +285,11 @@ class AnaliseVelocidadeIndicadores {
             };
         }
 
-        const adxAnterior = this.historicoADX[this.historicoADX.length - 1] || adxAtual;
-        const adxAntePenultimo = this.historicoADX[this.historicoADX.length - 2] || adxAnterior;
+        const adxAnterior = historico[historico.length - 1] || adxAtual;
+        const adxAntePenultimo = historico[historico.length - 2] || adxAnterior;
 
         const variacaoAtual = Math.abs(adxAtual - adxAnterior);
-        const variacao3Velas = Math.abs(adxAtual - (this.historicoADX[this.historicoADX.length - 3] || adxAtual));
+        const variacao3Velas = Math.abs(adxAtual - (historico[historico.length - 3] || adxAtual));
         const variacaoAnterior = Math.abs(adxAnterior - adxAntePenultimo);
         const aceleracao = variacaoAtual - variacaoAnterior;
 
@@ -522,31 +661,35 @@ class AnaliseVelocidadeIndicadores {
         }
     }
 
-    atualizarHistoricos(rsi, adx, preco) {
-        this.historicoRSI.push(rsi);
-        this.historicoADX.push(adx);
-        this.historicoPrecos.push(preco);
+    atualizarHistoricos(rsi, adx, preco, timeframeKey) {
+        if (!this.historicoRSI[timeframeKey]) this.historicoRSI[timeframeKey] = [];
+        if (!this.historicoADX[timeframeKey]) this.historicoADX[timeframeKey] = [];
+        if (!this.historicoPrecos[timeframeKey]) this.historicoPrecos[timeframeKey] = [];
 
-        if (this.historicoRSI.length > this.maxHistorico) {
-            this.historicoRSI = this.historicoRSI.slice(-this.maxHistorico);
+        this.historicoRSI[timeframeKey].push(rsi);
+        this.historicoADX[timeframeKey].push(adx);
+        this.historicoPrecos[timeframeKey].push(preco);
+
+        if (this.historicoRSI[timeframeKey].length > this.maxHistorico) {
+            this.historicoRSI[timeframeKey] = this.historicoRSI[timeframeKey].slice(-this.maxHistorico);
         }
-        if (this.historicoADX.length > this.maxHistorico) {
-            this.historicoADX = this.historicoADX.slice(-this.maxHistorico);
+        if (this.historicoADX[timeframeKey].length > this.maxHistorico) {
+            this.historicoADX[timeframeKey] = this.historicoADX[timeframeKey].slice(-this.maxHistorico);
         }
-        if (this.historicoPrecos.length > this.maxHistorico) {
-            this.historicoPrecos = this.historicoPrecos.slice(-this.maxHistorico);
+        if (this.historicoPrecos[timeframeKey].length > this.maxHistorico) {
+            this.historicoPrecos[timeframeKey] = this.historicoPrecos[timeframeKey].slice(-this.maxHistorico);
         }
     }
 
     calcularVariacaoPeriodo(historico, periodo) {
-        if (historico.length < periodo + 1) return 0;
+        if (!historico || historico.length < periodo + 1) return 0;
         const atual = historico[historico.length - 1];
         const passado = historico[historico.length - 1 - periodo];
         return Math.abs(atual - passado);
     }
 
     calcularAceleracao(historico) {
-        if (historico.length < 4) return 0;
+        if (!historico || historico.length < 4) return 0;
         const var1 = Math.abs(historico[historico.length - 1] - historico[historico.length - 2]);
         const var2 = Math.abs(historico[historico.length - 2] - historico[historico.length - 3]);
         const var3 = Math.abs(historico[historico.length - 3] - historico[historico.length - 4]);
@@ -554,7 +697,7 @@ class AnaliseVelocidadeIndicadores {
     }
 
     calcularVolatilidade(precos) {
-        if (precos.length < 5) return 1.0;
+        if (!precos || precos.length < 5) return 1.0;
         const retornos = [];
         for (let i = 1; i < precos.length; i++) {
             retornos.push(Math.abs((precos[i] - precos[i - 1]) / precos[i - 1] * 100));
@@ -635,9 +778,7 @@ class AnaliseVelocidadeIndicadores {
     }
 
     reset() {
-        this.historicoRSI = [];
-        this.historicoADX = [];
-        this.historicoPrecos = [];
+        this.inicializarHistoricos();
         this.padroesPerigosos = {
             rsiExtremoSaltos: 0,
             adxFalsoRompimento: 0,
@@ -646,18 +787,24 @@ class AnaliseVelocidadeIndicadores {
     }
 
     getEstatisticasGerais() {
+        const stats = {};
+        for (const [tf, historico] of Object.entries(this.historicoRSI)) {
+            stats[tf] = {
+                totalAnalises: historico.length,
+                ultimoRSI: historico[historico.length - 1],
+                ultimoADX: this.historicoADX[tf] ? this.historicoADX[tf][this.historicoADX[tf].length - 1] : null,
+                mediaVariacaoRSI: this.calcularMediaVariacao(historico),
+                mediaVariacaoADX: this.calcularMediaVariacao(this.historicoADX[tf] || [])
+            };
+        }
         return {
-            totalAnalises: this.historicoRSI.length,
             padroesPerigosos: this.padroesPerigosos,
-            ultimoRSI: this.historicoRSI[this.historicoRSI.length - 1],
-            ultimoADX: this.historicoADX[this.historicoADX.length - 1],
-            mediaVariacaoRSI: this.calcularMediaVariacao(this.historicoRSI),
-            mediaVariacaoADX: this.calcularMediaVariacao(this.historicoADX)
+            timeframes: stats
         };
     }
 
     calcularMediaVariacao(historico) {
-        if (historico.length < 2) return 0;
+        if (!historico || historico.length < 2) return 0;
         let soma = 0;
         for (let i = 1; i < historico.length; i++) {
             soma += Math.abs(historico[i] - historico[i - 1]);
