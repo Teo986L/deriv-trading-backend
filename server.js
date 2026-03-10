@@ -38,7 +38,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
-app.set('trust proxy', 1); // Resolve aviso do rate limit
+app.set('trust proxy', 1);
 
 // ========== CONFIGURAÇÃO DO REDIS ==========
 let redisClient = null;
@@ -63,6 +63,33 @@ if (process.env.REDIS_URL) {
 } else {
   console.log('⚠️ Redis não configurado - cache desativado');
 }
+
+// ========== DEFINIÇÃO DOS MODOS DE TRADING ==========
+const TRADING_MODES = {
+  'SNIPER': {
+    timeframes: ['M1', 'M5', 'M15'],
+    description: 'Entradas cirúrgicas de 1-15 minutos'
+  },
+  'CAÇADOR': {
+    timeframes: ['M5', 'M15', 'H1'],
+    description: 'Ondas médias de 15-60 minutos'
+  },
+  'PESCADOR': {
+    timeframes: ['M15', 'H1', 'H4'],
+    description: 'Grandes movimentos de horas a dias'
+  }
+};
+
+// Configurações completas de cada timeframe
+const ALL_TIMEFRAMES_CONFIG = {
+  'M1': { key: 'M1', seconds: 60, candleCount: 60, minRequired: 20 },
+  'M5': { key: 'M5', seconds: 300, candleCount: 72, minRequired: 30 },
+  'M15': { key: 'M15', seconds: 900, candleCount: 96, minRequired: 20 },
+  'M30': { key: 'M30', seconds: 1800, candleCount: 46, minRequired: 15 },
+  'H1': { key: 'H1', seconds: 3600, candleCount: 48, minRequired: 10 },
+  'H4': { key: 'H4', seconds: 14400, candleCount: 42, minRequired: 8 },
+  'H24': { key: 'H24', seconds: 86400, candleCount: 20, minRequired: 5 }
+};
 
 // ========== FUNÇÃO PARA OBTER CANDLES COM CACHE ==========
 async function getCandlesWithCache(client, symbol, tf) {
@@ -173,6 +200,19 @@ async function getDerivClient() {
 // ========== ROTAS PÚBLICAS ==========
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
+});
+
+// NOVA ROTA: Retorna os modos de trading disponíveis
+app.get('/api/trading-modes', (req, res) => {
+  res.json({
+    success: true,
+    modes: Object.keys(TRADING_MODES).map(key => ({
+      id: key,
+      name: key,
+      description: TRADING_MODES[key].description,
+      timeframes: TRADING_MODES[key].timeframes
+    }))
+  });
 });
 
 app.post('/api/validate-token', (req, res) => {
@@ -335,82 +375,96 @@ function calcularTimingM1(m1Analysis, primarySignal) {
 // ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   try {
-    const { symbol } = req.body;
+    const { symbol, mode } = req.body;
+    
     if (!symbol) {
       return res.status(400).json({ error: 'Símbolo é obrigatório' });
     }
 
+    if (!mode || !TRADING_MODES[mode]) {
+      return res.status(400).json({ 
+        error: 'Modo de trading inválido. Use: SNIPER, CAÇADOR ou PESCADOR',
+        availableModes: Object.keys(TRADING_MODES)
+      });
+    }
+
+    console.log(`🎯 Modo selecionado: ${mode} - ${TRADING_MODES[mode].description}`);
+    console.log(`📊 Timeframes a analisar: ${TRADING_MODES[mode].timeframes.join(', ')}`);
+
     const client = await getDerivClient();
 
-    const timeframesToAnalyze = [
-      { key: 'M1', seconds: 60, candleCount: 60, minRequired: 20 },
-      { key: 'M5', seconds: 300, candleCount: 72, minRequired: 30 },
-      { key: 'M15', seconds: 900, candleCount: 96, minRequired: 20 },
-      { key: 'M30', seconds: 1800, candleCount: 46, minRequired: 15 },
-      { key: 'H1', seconds: 3600, candleCount: 48, minRequired: 10 },
-      { key: 'H4', seconds: 14400, candleCount: 42, minRequired: 8 },
-      { key: 'H24', seconds: 86400, candleCount: 20, minRequired: 5 }
-    ];
+    // Filtra apenas os timeframes do modo selecionado
+    const timeframesToAnalyze = TRADING_MODES[mode].timeframes
+      .map(tfKey => ALL_TIMEFRAMES_CONFIG[tfKey]);
 
     const mtfManager = new MultiTimeframeManager();
     const sistemaBase = new SistemaAnaliseInteligente(symbol);
 
-    const promises = timeframesToAnalyze.map(async (tf) => {
+    // Processa timeframes sequencialmente (para economizar memória)
+    for (const tf of timeframesToAnalyze) {
       try {
+        console.log(`🔍 Analisando ${tf.key}...`);
         const candles = await getCandlesWithCache(client, symbol, tf);
         
         if (!Array.isArray(candles)) {
-          console.error(`❌ Resposta inválida para ${tf.key}: não é um array`, typeof candles);
-          return null;
+          console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
+          continue;
         }
         
-        return { key: tf.key, candles };
-      } catch (err) {
-        console.error(`Erro ao buscar ${tf.key}:`, err.message);
-        return null;
-      }
-    });
-
-    const results = await Promise.all(promises);
-
-    for (const result of results) {
-      if (!result) continue;
-      
-      const { key, candles } = result;
-      const tfConfig = timeframesToAnalyze.find(t => t.key === key);
-      
-      if (!candles || candles.length < tfConfig.minRequired) {
-        console.log(`⚠️ ${key}: apenas ${candles?.length || 0} candles, mínimo ${tfConfig.minRequired}`);
-        continue;
-      }
-
-      try {
-        const analysis = await sistemaBase.analisar(candles, key);
-        if (analysis && !analysis.erro) {
-          mtfManager.addAnalysis(key, analysis);
+        if (candles.length < tf.minRequired) {
+          console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
+          continue;
         }
-      } catch (analysisError) {
-        console.error(`❌ Erro na análise do timeframe ${key}:`, analysisError.message);
+
+        const analysis = await sistemaBase.analisar(candles, tf.key);
+        if (analysis && !analysis.erro) {
+          mtfManager.addAnalysis(tf.key, analysis);
+          console.log(`✅ ${tf.key} analisado com sucesso`);
+        }
+      } catch (err) {
+        console.error(`Erro ao buscar/analisar ${tf.key}:`, err.message);
       }
     }
 
     const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
-    const m5Price = mtfManager.timeframes['M5']?.analysis?.preco_atual || 0;
+    // Preço base para sugestão (usa o primeiro timeframe disponível)
+    const firstTf = timeframesToAnalyze[0]?.key || 'M5';
+    const basePrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
+    
     const suggestion = BotExecutionCore.generateEntrySuggestion(
       { sinal: consolidated.simpleMajority.signal, probabilidade: agreement.agreement / 100 },
-      m5Price
+      basePrice
     );
 
-    // ========== CALCULAR TIMING DE ENTRADA M1 ==========
-    const m1Analysis = mtfManager.timeframes['M1']?.analysis;
-    const primarySignal = consolidated.simpleMajority.signal;
-    const m1Timing = calcularTimingM1(m1Analysis, primarySignal);
+    // ========== CALCULAR TIMING DE ENTRADA M1 (se disponível no modo) ==========
+    let m1Timing = null;
+    if (TRADING_MODES[mode].timeframes.includes('M1')) {
+      const m1Analysis = mtfManager.timeframes['M1']?.analysis;
+      const primarySignal = consolidated.simpleMajority.signal;
+      m1Timing = calcularTimingM1(m1Analysis, primarySignal);
+    }
 
-    // Montar resposta com timing M1
+    // Montar resposta APENAS com os timeframes do modo selecionado
+    const responseTimeframes = {};
+    TRADING_MODES[mode].timeframes.forEach(tfKey => {
+      const tfData = mtfManager.timeframes[tfKey];
+      if (tfData?.analysis) {
+        responseTimeframes[tfKey] = {
+          sinal: tfData.analysis.sinal,
+          probabilidade: tfData.analysis.probabilidade,
+          adx: tfData.analysis.adx,
+          rsi: tfData.analysis.rsi,
+          preco_atual: tfData.analysis.preco_atual
+        };
+      }
+    });
+
     const response = {
       success: true,
+      mode: mode,
+      modeDescription: TRADING_MODES[mode].description,
       consolidated: {
         signal: consolidated.signal,
         confidence: consolidated.confidence,
@@ -418,7 +472,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
         sinal_premium: consolidated.sinal_premium || null,
-        m1_timing: m1Timing // 👈 NOVO: timing de entrada M1
+        m1_timing: m1Timing
       },
       agreement: {
         agreement: agreement.agreement,
@@ -434,20 +488,10 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         stopLoss: suggestion.stopLoss,
         takeProfit: suggestion.takeProfit
       },
-      timeframes: Object.fromEntries(
-        Object.entries(mtfManager.timeframes).map(([key, tf]) => [
-          key,
-          tf.analysis ? {
-            sinal: tf.analysis.sinal,
-            probabilidade: tf.analysis.probabilidade,
-            adx: tf.analysis.adx,
-            rsi: tf.analysis.rsi,
-            preco_atual: tf.analysis.preco_atual
-          } : null
-        ])
-      )
+      timeframes: responseTimeframes
     };
 
+    console.log(`✅ Análise concluída para modo ${mode} - ${agreement.totalTimeframes} TFs analisados`);
     res.json(response);
 
   } catch (error) {
@@ -465,6 +509,7 @@ app.use((req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
+  console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
   
   // Inicia a conexão com a Deriv assim que o servidor subir
   try {
