@@ -40,26 +40,33 @@ app.use(cors({
 app.use(express.json());
 app.set('trust proxy', 1);
 
-// ========== CONFIGURAÇÃO DO REDIS ==========
+// ========== CONFIGURAÇÃO DO REDIS (OPCIONAL) ==========
 let redisClient = null;
 
+// 🔥 TTLs ajustados para melhor performance
 const TTL_BY_TIMEFRAME = {
-  'M1': 15,
-  'M5': 30,
-  'M15': 45,
-  'M30': 60,
-  'H1': 75,
-  'H4': 90,
-  'H24': 105
+  'M1': 10,      // Reduzido para 10s (dados muito voláteis)
+  'M5': 20,      // Reduzido para 20s
+  'M15': 30,     // Reduzido para 30s
+  'M30': 45,     // Reduzido para 45s
+  'H1': 60,      // Reduzido para 60s
+  'H4': 120,     // Reduzido para 120s
+  'H24': 300     // Reduzido para 300s (5 minutos)
 };
 
 if (process.env.REDIS_URL) {
-  redisClient = createClient({ url: process.env.REDIS_URL });
-  redisClient.on('error', (err) => console.error('❌ Redis error:', err));
-  (async () => {
-    await redisClient.connect();
-    console.log('✅ Conectado ao Redis');
-  })();
+  try {
+    redisClient = createClient({ url: process.env.REDIS_URL });
+    redisClient.on('error', (err) => console.error('❌ Redis error:', err));
+    
+    (async () => {
+      await redisClient.connect();
+      console.log('✅ Conectado ao Redis');
+    })();
+  } catch (err) {
+    console.error('❌ Falha ao conectar Redis:', err);
+    redisClient = null;
+  }
 } else {
   console.log('⚠️ Redis não configurado - cache desativado');
 }
@@ -91,19 +98,41 @@ const ALL_TIMEFRAMES_CONFIG = {
   'H24': { key: 'H24', seconds: 86400, candleCount: 20, minRequired: 5 }
 };
 
-// ========== FUNÇÃO PARA OBTER CANDLES COM CACHE ==========
-async function getCandlesWithCache(client, symbol, tf) {
-  if (!redisClient || !redisClient.isReady) {
+// ========== FUNÇÃO PARA OBTER CANDLES COM CACHE (COM FALLBACK) ==========
+async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
+  // Se Redis não está disponível ou força dados frescos, busca direto
+  if (!redisClient || !redisClient.isReady || forceFresh) {
+    console.log(`🔄 Buscando ${tf.key} direto da Deriv (sem cache)`);
     return await client.getCandles(symbol, tf.candleCount, tf.seconds);
   }
 
   const cacheKey = `candles:${symbol}:${tf.key}`;
   
   try {
+    // Verificar se há dados em cache
     const cached = await redisClient.get(cacheKey);
     
     if (cached) {
-      console.log(`✅ Cache hit: ${cacheKey}`);
+      // Verificar TTL restante
+      const ttl = await redisClient.ttl(cacheKey);
+      console.log(`✅ Cache hit: ${cacheKey} (TTL: ${ttl}s)`);
+      
+      // Se TTL for muito baixo, busca novos dados em background (não bloqueante)
+      if (ttl < 5) {
+        setTimeout(async () => {
+          try {
+            const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+            if (Array.isArray(freshCandles)) {
+              const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
+              await redisClient.setEx(cacheKey, ttl, JSON.stringify(freshCandles));
+              console.log(`🔄 Cache atualizado em background: ${cacheKey}`);
+            }
+          } catch (err) {
+            console.error(`❌ Erro atualizando cache em background: ${err.message}`);
+          }
+        }, 0);
+      }
+      
       return JSON.parse(cached);
     }
     
@@ -115,12 +144,14 @@ async function getCandlesWithCache(client, symbol, tf) {
       return candles;
     }
     
+    // Salvar no cache
     const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
     await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
     
     return candles;
   } catch (error) {
     console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
+    // Fallback: busca direto da Deriv
     return await client.getCandles(symbol, tf.candleCount, tf.seconds);
   }
 }
@@ -142,9 +173,11 @@ const adminLimiter = rateLimit({
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   let token = authHeader && authHeader.split(' ')[1];
+  
   if (!token && req.body && req.body.token) {
     token = req.body.token;
   }
+  
   if (!token) {
     return res.status(401).json({ error: 'Token não fornecido' });
   }
@@ -202,7 +235,6 @@ app.get('/health', (req, res) => {
   res.status(200).send('OK');
 });
 
-// NOVA ROTA: Retorna os modos de trading disponíveis
 app.get('/api/trading-modes', (req, res) => {
   res.json({
     success: true,
@@ -217,6 +249,7 @@ app.get('/api/trading-modes', (req, res) => {
 
 app.post('/api/validate-token', (req, res) => {
   const { token } = req.body;
+  
   if (!token) {
     return res.status(400).json({ valid: false, message: 'Token não fornecido' });
   }
@@ -285,7 +318,7 @@ app.post('/api/admin/generate-token', adminLimiter, (req, res) => {
   });
 });
 
-// ========== ROTA PARA VERIFICAR STATUS DA CONEXÃO (DEBUG) ==========
+// ========== ROTA PARA VERIFICAR STATUS DA CONEXÃO ==========
 app.get('/api/connection-status', authenticateToken, (req, res) => {
   if (!derivClient) {
     return res.json({ status: 'not_initialized' });
@@ -295,7 +328,6 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
 
 // ========== FUNÇÃO PARA CALCULAR TIMING DE ENTRADA M1 ==========
 function calcularTimingM1(m1Analysis, primarySignal) {
-  // Se não há análise M1 ou sinal principal é HOLD, retorna neutro
   if (!m1Analysis || primarySignal === 'HOLD') {
     return {
       permitido: false,
@@ -305,9 +337,7 @@ function calcularTimingM1(m1Analysis, primarySignal) {
     };
   }
 
-  // Regras de timing baseadas no sinal principal
   if (primarySignal === 'CALL') {
-    // Para CALL, M1 deve estar em CALL e RSI < 65 (não sobrecomprado)
     if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65) {
       return {
         permitido: true,
@@ -316,7 +346,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
         sinal: m1Analysis.sinal
       };
     }
-    // Se M1 está PUT mas RSI oversold, pode ser oportunidade de reversão
     else if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi < 30) {
       return {
         permitido: true,
@@ -335,7 +364,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
     }
   }
   else if (primarySignal === 'PUT') {
-    // Para PUT, M1 deve estar em PUT e RSI > 35 (não sobrevendido)
     if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35) {
       return {
         permitido: true,
@@ -344,7 +372,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
         sinal: m1Analysis.sinal
       };
     }
-    // Se M1 está CALL mas RSI overbought, pode ser oportunidade de reversão
     else if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi > 70) {
       return {
         permitido: true,
@@ -363,7 +390,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
     }
   }
 
-  // Fallback para qualquer outro caso
   return {
     permitido: false,
     motivo: 'Sinal principal neutro',
@@ -374,6 +400,8 @@ function calcularTimingM1(m1Analysis, primarySignal) {
 
 // ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
+  const startTime = Date.now();
+  
   try {
     const { symbol, mode } = req.body;
     
@@ -388,7 +416,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       });
     }
 
-    console.log(`🎯 Modo selecionado: ${mode} - ${TRADING_MODES[mode].description}`);
+    console.log(`\n🎯 Modo selecionado: ${mode} - ${TRADING_MODES[mode].description}`);
     console.log(`📊 Timeframes a analisar: ${TRADING_MODES[mode].timeframes.join(', ')}`);
 
     const client = await getDerivClient();
@@ -398,13 +426,27 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       .map(tfKey => ALL_TIMEFRAMES_CONFIG[tfKey]);
 
     const mtfManager = new MultiTimeframeManager();
+    
+    // 🔥 Detectar tipo de ativo para passar ao sistema de análise
+    const tipoAtivo = symbol.startsWith('R_') ? 'volatility_index' : 
+                     (symbol.includes('frx') ? 'forex' : 'indice_normal');
+    
     const sistemaBase = new SistemaAnaliseInteligente(symbol);
+    
+    // 🔥 Passar tipo de ativo para o sistema de pesos
+    if (sistemaBase.sistemaPesos && sistemaBase.sistemaPesos.setTipoAtivo) {
+      sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
+    }
 
-    // Processa timeframes sequencialmente (para economizar memória)
+    // Processa timeframes sequencialmente
     for (const tf of timeframesToAnalyze) {
       try {
         console.log(`🔍 Analisando ${tf.key}...`);
-        const candles = await getCandlesWithCache(client, symbol, tf);
+        
+        // 🔥 Forçar dados frescos para timeframes curtos a cada 2 análises
+        const forceFresh = (tf.key === 'M1' || tf.key === 'M5') && (Math.random() > 0.5);
+        
+        const candles = await getCandlesWithCache(client, symbol, tf, forceFresh);
         
         if (!Array.isArray(candles)) {
           console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
@@ -417,19 +459,20 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         }
 
         const analysis = await sistemaBase.analisar(candles, tf.key);
+        
         if (analysis && !analysis.erro) {
           mtfManager.addAnalysis(tf.key, analysis);
           console.log(`✅ ${tf.key} analisado com sucesso`);
         }
       } catch (err) {
-        console.error(`Erro ao buscar/analisar ${tf.key}:`, err.message);
+        console.error(`❌ Erro ao buscar/analisar ${tf.key}:`, err.message);
       }
     }
 
     const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
-    // Preço base para sugestão (usa o primeiro timeframe disponível)
+    // Preço base para sugestão
     const firstTf = timeframesToAnalyze[0]?.key || 'M5';
     const basePrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
     
@@ -438,7 +481,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       basePrice
     );
 
-    // ========== CALCULAR TIMING DE ENTRADA M1 (se disponível no modo) ==========
+    // Calcular timing de entrada M1
     let m1Timing = null;
     if (TRADING_MODES[mode].timeframes.includes('M1')) {
       const m1Analysis = mtfManager.timeframes['M1']?.analysis;
@@ -446,7 +489,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       m1Timing = calcularTimingM1(m1Analysis, primarySignal);
     }
 
-    // Montar resposta APENAS com os timeframes do modo selecionado
+    // Montar resposta apenas com os timeframes do modo selecionado
     const responseTimeframes = {};
     TRADING_MODES[mode].timeframes.forEach(tfKey => {
       const tfData = mtfManager.timeframes[tfKey];
@@ -461,6 +504,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       }
     });
 
+    const responseTime = Date.now() - startTime;
+    
     const response = {
       success: true,
       mode: mode,
@@ -488,15 +533,22 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         stopLoss: suggestion.stopLoss,
         takeProfit: suggestion.takeProfit
       },
-      timeframes: responseTimeframes
+      timeframes: responseTimeframes,
+      metadata: {
+        responseTimeMs: responseTime,
+        timestamp: new Date().toISOString()
+      }
     };
 
-    console.log(`✅ Análise concluída para modo ${mode} - ${agreement.totalTimeframes} TFs analisados`);
+    console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados`);
     res.json(response);
 
   } catch (error) {
-    console.error('Erro na análise:', error);
-    res.status(500).json({ error: error.message });
+    console.error('❌ Erro na análise:', error);
+    res.status(500).json({ 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
@@ -505,13 +557,24 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Rota não encontrada' });
 });
 
+// ========== MIDDLEWARE DE ERRO GLOBAL ==========
+app.use((err, req, res, next) => {
+  console.error('❌ Erro global:', err);
+  res.status(500).json({ 
+    error: 'Erro interno do servidor',
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
+});
+
 // ========== INICIALIZAÇÃO DO SERVIDOR ==========
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+
+const server = app.listen(PORT, async () => {
+  console.log(`\n🚀 Servidor rodando na porta ${PORT}`);
   console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
+  console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
   
-  // Inicia a conexão com a Deriv assim que o servidor subir
+  // Inicia a conexão com a Deriv
   try {
     console.log('🔄 Iniciando conexão persistente com a Deriv...');
     await getDerivClient();
@@ -523,12 +586,28 @@ app.listen(PORT, async () => {
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('🛑 Recebido SIGTERM, encerrando conexões...');
-  if (derivClient) {
-    derivClient.disconnect();
-  }
-  if (redisClient) {
-    redisClient.quit();
-  }
-  process.exit(0);
+  console.log('\n🛑 Recebido SIGTERM, encerrando conexões...');
+  
+  server.close(() => {
+    console.log('✅ Servidor HTTP encerrado');
+    
+    if (derivClient) {
+      derivClient.disconnect();
+      console.log('✅ Cliente Deriv desconectado');
+    }
+    
+    if (redisClient) {
+      redisClient.quit();
+      console.log('✅ Cliente Redis desconectado');
+    }
+    
+    process.exit(0);
+  });
 });
+
+process.on('SIGINT', () => {
+  console.log('\n🛑 Recebido SIGINT, encerrando...');
+  process.emit('SIGTERM');
+});
+
+module.exports = app;
