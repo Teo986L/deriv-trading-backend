@@ -12,6 +12,28 @@ class MultiTimeframeManager {
         };
         this.consolidatedSignal = { signal: 'HOLD', confidence: 0, agreement: 0, details: {} };
         this.allAnalyses = {};
+        
+        // 🔥 NOVO: Pesos base por timeframe (hierarquia)
+        this.TF_BASE_WEIGHT = {
+            'M1': 0.5,
+            'M5': 1.0,
+            'M15': 1.5,
+            'M30': 2.0,
+            'H1': 2.5,
+            'H4': 3.0,
+            'H24': 3.5
+        };
+        
+        // 🔥 NOVO: Limiares de ADX para participação
+        this.ADX_THRESHOLDS = {
+            'M1': { min: 15, ignore_below: 12 },
+            'M5': { min: 15, ignore_below: 12 },
+            'M15': { min: 18, ignore_below: 15 },
+            'M30': { min: 18, ignore_below: 15 },
+            'H1': { min: 15, ignore_below: 12 },
+            'H4': { min: 12, ignore_below: 10 },
+            'H24': { min: 10, ignore_below: 8 }
+        };
     }
 
     addAnalysis(timeframeKey, analysis) {
@@ -19,6 +41,107 @@ class MultiTimeframeManager {
             this.timeframes[timeframeKey].analysis = analysis;
             this.allAnalyses[timeframeKey] = analysis;
         }
+    }
+
+    // 🔥 NOVO: Calcula peso baseado em ADX e timeframe
+    calcularPesoPorTF(timeframeKey, analysis) {
+        if (!analysis || !analysis.adx) return 0;
+        
+        const adx = analysis.adx;
+        const baseWeight = this.TF_BASE_WEIGHT[timeframeKey] || 1.0;
+        const thresholds = this.ADX_THRESHOLDS[timeframeKey] || { min: 15, ignore_below: 12 };
+        
+        // 🔥 Regra 1: ADX abaixo do mínimo = IGNORAR
+        if (adx < thresholds.ignore_below) {
+            return 0;
+        }
+        
+        // 🔥 Regra 2: ADX entre ignore_below e min = peso reduzido
+        if (adx < thresholds.min) {
+            const factor = (adx - thresholds.ignore_below) / (thresholds.min - thresholds.ignore_below);
+            return baseWeight * Math.max(0.3, factor);
+        }
+        
+        // 🔥 Regra 3: ADX normal (entre min e 30) = peso normal
+        if (adx < 30) {
+            return baseWeight;
+        }
+        
+        // 🔥 Regra 4: ADX forte (>30) = peso aumentado
+        const adxMultiplier = 1.0 + (Math.min(adx, 50) - 30) / 20; // Max 2.0 em ADX 50
+        return baseWeight * Math.min(2.0, adxMultiplier);
+    }
+
+    // 🔥 NOVO: Verifica se há divergência perigosa entre timeframes
+    detectarDivergencias() {
+        const divergencias = [];
+        
+        // Pega os sinais dos timeframes principais
+        const h4 = this.allAnalyses['H4'];
+        const h1 = this.allAnalyses['H1'];
+        const m30 = this.allAnalyses['M30'];
+        const m15 = this.allAnalyses['M15'];
+        const m5 = this.allAnalyses['M5'];
+        
+        // Divergência H4 vs H1
+        if (h4 && h1 && h4.sinal !== h1.sinal) {
+            if (h4.adx >= 20 && h1.adx >= 20) {
+                divergencias.push({
+                    tipo: 'DIVERGENCIA_MAIOR',
+                    entre: ['H4', 'H1'],
+                    descricao: `H4 quer ${h4.sinal} mas H1 quer ${h1.sinal}`,
+                    severidade: 80
+                });
+            }
+        }
+        
+        // Divergência H1 vs M15
+        if (h1 && m15 && h1.sinal !== m15.sinal) {
+            if (h1.adx >= 18 && m15.adx >= 15) {
+                divergencias.push({
+                    tipo: 'DIVERGENCIA_MEDIA',
+                    entre: ['H1', 'M15'],
+                    descricao: `H1 quer ${h1.sinal} mas M15 quer ${m15.sinal}`,
+                    severidade: 60
+                });
+            }
+        }
+        
+        // Múltiplos timeframes divergentes
+        const sinais = [];
+        if (h4) sinais.push({ tf: 'H4', sinal: h4.sinal, adx: h4.adx });
+        if (h1) sinais.push({ tf: 'H1', sinal: h1.sinal, adx: h1.adx });
+        if (m30) sinais.push({ tf: 'M30', sinal: m30.sinal, adx: m30.adx });
+        if (m15) sinais.push({ tf: 'M15', sinal: m15.sinal, adx: m15.adx });
+        
+        const calls = sinais.filter(s => s.sinal === 'CALL').length;
+        const puts = sinais.filter(s => s.sinal === 'PUT').length;
+        
+        if (calls > 0 && puts > 0 && (calls + puts) >= 3) {
+            divergencias.push({
+                tipo: 'MULTIPLA_DIVERGENCIA',
+                descricao: `${calls} CALL vs ${puts} PUT - mercado indefinido`,
+                severidade: 70
+            });
+        }
+        
+        return divergencias;
+    }
+
+    // 🔥 NOVO: Calcula o timeframe dominante (maior peso)
+    getTimeframeDominante() {
+        let maxPeso = 0;
+        let dominante = null;
+        
+        for (const [tf, analysis] of Object.entries(this.allAnalyses)) {
+            const peso = this.calcularPesoPorTF(tf, analysis);
+            if (peso > maxPeso) {
+                maxPeso = peso;
+                dominante = { tf, peso, sinal: analysis.sinal, adx: analysis.adx };
+            }
+        }
+        
+        return dominante;
     }
 
     calculateAgreement() {
@@ -50,15 +173,35 @@ class MultiTimeframeManager {
         };
     }
 
+    // 🔥 VERSÃO MODIFICADA: Agora usa pesos por ADX
     consolidateSignals() {
-        const weights = { M1: 1, M5: 2, M15: 3, M30: 4, H1: 5, H4: 6, H24: 7 };
-        let totalWeight = 0, callWeight = 0, putWeight = 0, totalConfidence = 0, timeframesCount = 0;
+        let totalWeight = 0;
+        let callWeight = 0;
+        let putWeight = 0;
+        let totalConfidence = 0;
+        let timeframesCount = 0;
         const details = {};
 
         let callCount = 0, putCount = 0, holdCount = 0;
 
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
-            const weight = weights[key] || 1;
+            if (!analysis) continue;
+            
+            // 🔥 Calcula peso dinâmico baseado em ADX
+            const weight = this.calcularPesoPorTF(key, analysis);
+            
+            if (weight === 0) {
+                // Timeframe ignorado (ADX muito baixo)
+                details[key] = {
+                    signal: analysis.sinal,
+                    confidence: (analysis.probabilidade * 100).toFixed(1) + '%',
+                    price: analysis.preco_atual,
+                    adx: analysis.adx,
+                    status: 'IGNORADO (ADX baixo)'
+                };
+                continue;
+            }
+
             totalWeight += weight;
 
             if (analysis.sinal === 'CALL') {
@@ -81,11 +224,20 @@ class MultiTimeframeManager {
                 signal: analysis.sinal,
                 confidence: (analysis.probabilidade * 100).toFixed(1) + '%',
                 price: analysis.preco_atual,
-                trend: analysis.tendencia
+                adx: analysis.adx,
+                weight: weight.toFixed(2),
+                trend: analysis.tendencia,
+                status: 'ATIVO'
             };
         }
 
-        const primarySignal = callCount > putCount ? 'CALL' : (putCount > callCount ? 'PUT' : 'HOLD');
+        // 🔥 Se nenhum timeframe passou no filtro, usa o que tiver ADX mais alto
+        if (totalWeight === 0 && timeframesCount > 0) {
+            console.warn("⚠️ Nenhum timeframe com ADX suficiente - usando o melhor disponível");
+            return this.consolidateSignalsFallback();
+        }
+
+        const primarySignal = callWeight > putWeight ? 'CALL' : (putWeight > callWeight ? 'PUT' : 'HOLD');
 
         let agreement = 0;
         if (primarySignal === 'CALL') {
@@ -98,11 +250,21 @@ class MultiTimeframeManager {
 
         let confidence = 0;
         if (primarySignal === 'CALL') {
-            confidence = callWeight / totalWeight;
+            confidence = totalWeight > 0 ? callWeight / totalWeight : 0;
         } else if (primarySignal === 'PUT') {
-            confidence = putWeight / totalWeight;
+            confidence = totalWeight > 0 ? putWeight / totalWeight : 0;
         } else {
             confidence = totalConfidence / (timeframesCount * 100);
+        }
+
+        // 🔥 Detectar divergências
+        const divergencias = this.detectarDivergencias();
+        const timeframeDominante = this.getTimeframeDominante();
+
+        // 🔥 Ajustar confiança com base em divergências
+        if (divergencias.length > 0) {
+            const severidadeMedia = divergencias.reduce((acc, d) => acc + d.severidade, 0) / divergencias.length;
+            confidence *= (1 - (severidadeMedia / 200)); // Reduz até 50% em caso crítico
         }
 
         const majorityRatio = Math.max(callCount, putCount) / (callCount + putCount + holdCount);
@@ -127,10 +289,59 @@ class MultiTimeframeManager {
                 putCount,
                 holdCount
             },
-            allAnalyses: this.allAnalyses
+            allAnalyses: this.allAnalyses,
+            // 🔥 NOVOS CAMPOS
+            divergencias: divergencias,
+            timeframeDominante: timeframeDominante,
+            recomendacao: divergencias.length > 1 ? 'AGUARDAR' : 
+                          (confidence > 0.7 ? primarySignal : 'CAUTELA')
         };
 
         return this.consolidatedSignal;
+    }
+
+    // 🔥 Fallback para quando todos os ADX estão baixos
+    consolidateSignalsFallback() {
+        let bestTF = null;
+        let bestADX = 0;
+        
+        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
+            if (analysis && analysis.adx > bestADX) {
+                bestADX = analysis.adx;
+                bestTF = { tf: key, analysis };
+            }
+        }
+        
+        if (bestTF) {
+            return {
+                signal: bestTF.analysis.sinal,
+                confidence: 0.4, // Confiança reduzida
+                agreement: 33,
+                details: { [bestTF.tf]: bestTF.analysis },
+                timeframesAnalyzed: 1,
+                simpleMajority: {
+                    signal: bestTF.analysis.sinal,
+                    callCount: bestTF.analysis.sinal === 'CALL' ? 1 : 0,
+                    putCount: bestTF.analysis.sinal === 'PUT' ? 1 : 0,
+                    holdCount: 0
+                },
+                divergencias: [],
+                timeframeDominante: { tf: bestTF.tf, sinal: bestTF.analysis.sinal, adx: bestADX },
+                recomendacao: 'USAR_COM_CAUTELA'
+            };
+        }
+        
+        return {
+            signal: 'HOLD',
+            confidence: 0,
+            agreement: 0,
+            details: {},
+            timeframesAnalyzed: 0,
+            simpleMajority: { signal: 'HOLD', callCount: 0, putCount: 0, holdCount: 0 },
+            divergencias: [],
+            timeframeDominante: null,
+            recomendacao: 'AGUARDAR'
+        };
     }
 }
 
