@@ -44,13 +44,13 @@ app.set('trust proxy', 1); // Resolve aviso do rate limit
 let redisClient = null;
 
 const TTL_BY_TIMEFRAME = {
-  'M1': 30,
-  'M5': 60,
-  'M15': 120,
-  'M30': 180,
-  'H1': 300,
-  'H4': 600,
-  'H24': 1800
+  'M1': 15,
+  'M5': 30,
+  'M15': 45,
+  'M30': 60,
+  'H1': 75,
+  'H4': 90,
+  'H24': 105
 };
 
 if (process.env.REDIS_URL) {
