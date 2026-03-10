@@ -397,45 +397,93 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const mtfManager = new MultiTimeframeManager();
     const sistemaBase = new SistemaAnaliseInteligente(symbol);
 
-    const promises = timeframesToAnalyze.map(async (tf) => {
-      try {
-        const candles = await getCandlesWithCache(client, symbol, tf);
-        
-        if (!Array.isArray(candles)) {
-          console.error(`❌ Resposta inválida para ${tf.key}: não é um array`, typeof candles);
-          return null;
+    // 1. Buscar TODOS os candles em paralelo
+    const candleResults = await Promise.allSettled(
+      timeframesToAnalyze.map(async (tf) => {
+        try {
+          const candles = await getCandlesWithCache(client, symbol, tf);
+          return { key: tf.key, candles, tf };
+        } catch (err) {
+          console.error(`❌ Erro ao buscar ${tf.key}:`, err.message);
+          return { key: tf.key, candles: null, tf, error: err.message };
         }
-        
-        return { key: tf.key, candles };
-      } catch (err) {
-        console.error(`Erro ao buscar ${tf.key}:`, err.message);
-        return null;
-      }
-    });
+      })
+    );
 
-    const results = await Promise.all(promises);
+    // 2. Filtrar apenas resultados válidos (candles array)
+    const validCandleResults = candleResults
+      .filter(r => r.status === 'fulfilled' && r.value && Array.isArray(r.value.candles))
+      .map(r => r.value);
 
-    for (const result of results) {
-      if (!result) continue;
-      
-      const { key, candles } = result;
+    if (validCandleResults.length === 0) {
+      return res.status(503).json({ 
+        success: false,
+        error: 'Não foi possível obter dados de nenhum timeframe',
+        retry: true
+      });
+    }
+
+    // 3. Executar as ANÁLISES em paralelo
+    const analysisPromises = validCandleResults.map(async ({ key, candles }) => {
       const tfConfig = timeframesToAnalyze.find(t => t.key === key);
-      
-      if (!candles || candles.length < tfConfig.minRequired) {
-        console.log(`⚠️ ${key}: apenas ${candles?.length || 0} candles, mínimo ${tfConfig.minRequired}`);
-        continue;
+      if (candles.length < tfConfig.minRequired) {
+        console.log(`⚠️ ${key}: apenas ${candles.length} candles, mínimo ${tfConfig.minRequired} – ignorado`);
+        return { key, success: false, reason: 'insufficient_candles' };
       }
 
       try {
         const analysis = await sistemaBase.analisar(candles, key);
         if (analysis && !analysis.erro) {
           mtfManager.addAnalysis(key, analysis);
+          console.log(`✅ Análise concluída: ${key} (sinal: ${analysis.sinal})`);
+          return { key, success: true, analysis };
+        } else {
+          console.log(`⚠️ Análise retornou erro para ${key}:`, analysis?.erro);
+          return { key, success: false, reason: 'analysis_error', error: analysis?.erro };
         }
       } catch (analysisError) {
-        console.error(`❌ Erro na análise do timeframe ${key}:`, analysisError.message);
+        console.error(`❌ Exceção na análise do timeframe ${key}:`, analysisError.message);
+        return { key, success: false, reason: 'exception', error: analysisError.message };
       }
+    });
+
+    const analysisResults = await Promise.allSettled(analysisPromises);
+
+    // 4. Verificar quantos timeframes foram analisados com sucesso
+    const successfulTimeframes = analysisResults.filter(
+      r => r.status === 'fulfilled' && r.value.success
+    ).length;
+
+    // 5. Se menos de 4 timeframes bem-sucedidos, sugere nova tentativa
+    if (successfulTimeframes < 4) {
+      console.log(`⚠️ Apenas ${successfulTimeframes} timeframes disponíveis – retry necessário`);
+      return res.json({
+        success: true,
+        warning: 'Dados insuficientes para análise confiável',
+        consolidated: {
+          signal: 'HOLD',
+          confidence: 0,
+          agreement: 0,
+          simpleMajority: { signal: 'HOLD', callCount: 0, putCount: 0, holdCount: 0 },
+          timeframesAnalyzed: successfulTimeframes,
+          retry: true
+        },
+        timeframes: Object.fromEntries(
+          Object.entries(mtfManager.timeframes).map(([key, tf]) => [
+            key,
+            tf.analysis ? {
+              sinal: tf.analysis.sinal,
+              probabilidade: tf.analysis.probabilidade,
+              adx: tf.analysis.adx,
+              rsi: tf.analysis.rsi,
+              preco_atual: tf.analysis.preco_atual
+            } : null
+          ])
+        )
+      });
     }
 
+    // 6. Consolidar sinais
     const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
@@ -445,12 +493,10 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       m5Price
     );
 
-    // ========== CALCULAR TIMING DE ENTRADA M1 ==========
     const m1Analysis = mtfManager.timeframes['M1']?.analysis;
     const primarySignal = consolidated.simpleMajority.signal;
     const m1Timing = calcularTimingM1(m1Analysis, primarySignal);
 
-    // Montar resposta com timing M1
     const response = {
       success: true,
       consolidated: {
@@ -460,7 +506,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
         sinal_premium: consolidated.sinal_premium || null,
-        m1_timing: m1Timing // 👈 timing de entrada M1
+        m1_timing: m1Timing
       },
       agreement: {
         agreement: agreement.agreement,
@@ -493,8 +539,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     res.json(response);
 
   } catch (error) {
-    console.error('Erro na análise:', error);
-    res.status(500).json({ error: error.message });
+    console.error('❌ Erro na análise:', error);
+    res.status(500).json({ error: error.message, success: false });
   }
 });
 
