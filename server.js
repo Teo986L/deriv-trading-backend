@@ -326,7 +326,7 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
   res.json(derivClient.getConnectionStatus());
 });
 
-// ========== FUNÇÃO PARA CALCULAR TIMING DE ENTRADA M1 (SNIPER) ==========
+// ========== FUNÇÃO PARA CALCULAR TIMING DE ENTRADA M1 ==========
 function calcularTimingM1(m1Analysis, primarySignal) {
   if (!m1Analysis || primarySignal === 'HOLD') {
     return {
@@ -398,124 +398,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
   };
 }
 
-// ========== NOVA FUNÇÃO: TIMING DO CAÇADOR (baseado no M5) ==========
-function calcularTimingCacador(m5Analysis, h1Analysis) {
-  if (!m5Analysis || !h1Analysis) {
-    return {
-      permitido: false,
-      motivo: 'Dados insuficientes',
-      rsi: m5Analysis?.rsi || null,
-      adx: m5Analysis?.adx || null
-    };
-  }
-
-  // Regra 1: Mesma direção do H1
-  if (m5Analysis.sinal !== h1Analysis.sinal) {
-    return { 
-      permitido: false, 
-      motivo: `M5 (${m5Analysis.sinal}) contra H1 (${h1Analysis.sinal})`,
-      rsi: m5Analysis.rsi,
-      adx: m5Analysis.adx
-    };
-  }
-
-  // Regra 2: RSI em zona segura
-  if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi > 65) {
-    return { 
-      permitido: false, 
-      motivo: `RSI alto (${m5Analysis.rsi.toFixed(0)}) - sobrecomprado`,
-      rsi: m5Analysis.rsi,
-      adx: m5Analysis.adx
-    };
-  }
-
-  if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi < 35) {
-    return { 
-      permitido: false, 
-      motivo: `RSI baixo (${m5Analysis.rsi.toFixed(0)}) - sobrevendido`,
-      rsi: m5Analysis.rsi,
-      adx: m5Analysis.adx
-    };
-  }
-
-  // Regra 3: ADX mínimo
-  if (m5Analysis.adx < 15) {
-    return { 
-      permitido: false, 
-      motivo: `ADX baixo (${m5Analysis.adx.toFixed(1)}) - sem força`,
-      rsi: m5Analysis.rsi,
-      adx: m5Analysis.adx
-    };
-  }
-
-  // Tudo ok!
-  return {
-    permitido: true,
-    motivo: 'M5 confirmando H1',
-    rsi: m5Analysis.rsi,
-    adx: m5Analysis.adx
-  };
-}
-
-// ========== NOVA FUNÇÃO: TIMING DO PESCADOR (baseado no M15) ==========
-function calcularTimingPescador(m15Analysis, h4Analysis) {
-  if (!m15Analysis || !h4Analysis) {
-    return {
-      permitido: false,
-      motivo: 'Dados insuficientes',
-      rsi: m15Analysis?.rsi || null,
-      adx: m15Analysis?.adx || null
-    };
-  }
-
-  // Regra 1: Mesma direção do H4
-  if (m15Analysis.sinal !== h4Analysis.sinal) {
-    return { 
-      permitido: false, 
-      motivo: `M15 (${m15Analysis.sinal}) contra H4 (${h4Analysis.sinal})`,
-      rsi: m15Analysis.rsi,
-      adx: m15Analysis.adx
-    };
-  }
-
-  // Regra 2: RSI em zona segura
-  if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi > 70) {
-    return { 
-      permitido: false, 
-      motivo: `RSI alto (${m15Analysis.rsi.toFixed(0)}) - sobrecomprado`,
-      rsi: m15Analysis.rsi,
-      adx: m15Analysis.adx
-    };
-  }
-
-  if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi < 30) {
-    return { 
-      permitido: false, 
-      motivo: `RSI baixo (${m15Analysis.rsi.toFixed(0)}) - sobrevendido`,
-      rsi: m15Analysis.rsi,
-      adx: m15Analysis.adx
-    };
-  }
-
-  // Regra 3: ADX mínimo
-  if (m15Analysis.adx < 14) {
-    return { 
-      permitido: false, 
-      motivo: `ADX baixo (${m15Analysis.adx.toFixed(1)}) - sem força`,
-      rsi: m15Analysis.rsi,
-      adx: m15Analysis.adx
-    };
-  }
-
-  // Tudo ok!
-  return {
-    permitido: true,
-    motivo: 'M15 confirmando H4',
-    rsi: m15Analysis.rsi,
-    adx: m15Analysis.adx
-  };
-}
-
 // ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
@@ -557,294 +439,112 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     }
 
     // Processa timeframes sequencialmente
-    for (frames sequencialmente
-    for (const tf of timeframesToconst tf of timeframesToAnalyze) {
+    for (const tf of timeframesToAnalyze) {
       try {
-        console.logAnalyze) {
-      try {
-        console.log(`🔍 Analisando ${tf(`🔍 Analisando ${tf.key}...`);
+        console.log(`🔍 Analisando ${tf.key}...`);
         
-        // 🔥 Forçar dados frescos para time.key}...`);
-        
-        // 🔥 Forçar dados frescos para timeframes curtos a cada 2 análframes curtos a cada 2 análises
-        const forceFresh = (tf.key === 'ises
-        const forceFresh = (tf.key === 'M1M1' || tf.key === 'M5') && (Math.random() > ' || tf.key === 'M5') && (Math.random() > 0.5);
-        
-        const candles = await getCandlesWith0.5);
+        // 🔥 Forçar dados frescos para timeframes curtos a cada 2 análises
+        const forceFresh = (tf.key === 'M1' || tf.key === 'M5') && (Math.random() > 0.5);
         
         const candles = await getCandlesWithCache(client, symbol, tf, forceFresh);
         
-Cache(client, symbol, tf, forceFresh);
-        
-        if (!Array.isArray(cand        if (!Array.isArray(candles)) {
-          console.error(`❌ Resles)) {
-          console.error(`❌ Resposta inválida para ${tf.key}: nãoposta inválida para ${tf.key}: não é um é um array`);
-          continue;
-        array`);
+        if (!Array.isArray(candles)) {
+          console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
           continue;
         }
-        
-        if (candles.length < tf.min }
         
         if (candles.length < tf.minRequired) {
-          console.logRequired) {
-          console.log(`⚠(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
-️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
-          continue          continue;
+          console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
+          continue;
         }
 
-        const analysis = await sistemaBase.anal;
-        }
-
-        const analysis = await sistemaBaseisar(c.analisar(candles, tf.key);
-        
-        if (analysis &&andles, tf.key);
+        const analysis = await sistemaBase.analisar(candles, tf.key);
         
         if (analysis && !analysis.erro) {
-          mtfManager.add !analysis.erro) {
-          mtfManager.addAnalysis(tAnalysis(tf.key, analysis);
-          console.log(`✅ ${tff.key, analysis);
-          console.log(`✅ ${tf.key} analisado com sucesso.key} analisado com sucesso`);
-        }
-      } catch (err`);
+          mtfManager.addAnalysis(tf.key, analysis);
+          console.log(`✅ ${tf.key} analisado com sucesso`);
         }
       } catch (err) {
-        console.error(`❌ Erro) {
         console.error(`❌ Erro ao buscar/analisar ${tf.key}:`, err.message);
       }
     }
 
-    ao buscar/analisar ${tf.key}:`, err.message);
-      }
-    const consolidated = mtfManager }
-
     const consolidated = mtfManager.consolidateSignals();
-    const agreement = mt.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
     // Preço base para sugestão
-    const firstfManager.calculateAgreement();
-
-    // Preço base para sugestão
-    const firstTf = timeframesToAnalyze[0]?.Tf = timeframesToAnalyze[0]?.key || 'M5';
-    const basePrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
-    
-    const suggestion = BotExecutionCore.generateEntrySuggestion(
-      { sinal: consolidated.simpleMajority.signal, probabilidadekey || 'M5';
+    const firstTf = timeframesToAnalyze[0]?.key || 'M5';
     const basePrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
     
     const suggestion = BotExecutionCore.generateEntrySuggestion(
       { sinal: consolidated.simpleMajority.signal, probabilidade: agreement.agreement / 100 },
-      basePrice: agreement.agreement / 100 },
       basePrice
     );
 
-    // ========== CALCULAR TIMINGS ESPECÍFICOS PARA
-    );
-
-    // ========== CALCULAR TIMINGS ESPECÍFICOS PARA CADA MODO ==========
+    // Calcular timing de entrada M1
     let m1Timing = null;
-    let m5Timing CADA MODO ==========
-    let m1Tim = null;
-    let m15Timing =ing = null;
-    let m5Timing = null;
-    let m15Timing = null null;
-
-    // Timing do SNIPER (M1)
-    if (TRADING_MOD;
-
-    // Timing do SNIPER (M1)
-    if (TRADES[mode].timeframes.includes('M1')) {
-ING_MODES[mode].timeframes.includes('M1')) {
-      const m1Analysis =      const m1Analysis = mtfManager.timeframes['M1'] mtfManager.timeframes['M1']?.analysis;
-      const primarySignal = consolidated.simpleMajority?.analysis;
+    if (TRADING_MODES[mode].timeframes.includes('M1')) {
+      const m1Analysis = mtfManager.timeframes['M1']?.analysis;
       const primarySignal = consolidated.simpleMajority.signal;
-      m1Timing = calcular.signal;
-      m1Timing = calcularTimingM1(m1TimingM1(m1Analysis, primarySignal);
+      m1Timing = calcularTimingM1(m1Analysis, primarySignal);
     }
-
-    // Timing do CAÇADOR (Analysis, primarySignal);
-    }
-
-    // Timing do CAÇADOR (M5)
-   M5)
-    if (mode === 'CAÇAD if (mode === 'CAÇADOR') {
-      const mOR') {
-      const m5Analysis = mtfManager.timeframes['M5']?.analysis5Analysis = mtfManager.timeframes['M5']?.analysis;
-      const h;
-      const h1Analysis = mtfManager1Analysis = mtfManager.timeframes['H.timeframes['H1']?.analysis;
-      m5Timing = calcular1']?.analysis;
-      m5Timing = calcularTimingCacador(mTimingCacador(m5Analysis, h1Analysis5Analysis, h1Analysis);
-   );
-    }
-
-    }
-
-    // Timing do PESCADOR ( // Timing do PESCADOR (M15)
-    if (mode === 'PESCADOR') {
-      const mM15)
-    if (mode === 'PESCADOR') {
-      const m15Analysis = mt15Analysis = mtfManager.timeframes['M15']?.analysisfManager.timeframes['M15']?.analysis;
-      const h4Analysis = mtfManager.timeframes['H;
-      const h4Analysis = mtfManager.timeframes['H4']4']?.analysis;
-      m15Timing = calcularTimingPescador(m15Analysis?.analysis;
-      m15Timing = calcularTimingPescador(m15Analysis, h4Analysis);
-   , h4Analysis);
-    }
-
-    // Montar resposta apenas com os time }
 
     // Montar resposta apenas com os timeframes do modo selecionado
     const responseTimeframes = {};
-    TRframes do modo selecionado
-    const responseTimeframes = {};
-    TRADING_MODESADING_MODES[mode].timeframes.forEach(tfKey =>[mode].timeframes.forEach(tfKey => {
-      const tfData = mtfManager.timeframes[tfKey {
+    TRADING_MODES[mode].timeframes.forEach(tfKey => {
       const tfData = mtfManager.timeframes[tfKey];
-      if (tfData?.analysis];
       if (tfData?.analysis) {
-        const timeframeObj = {
-          s) {
-        const timeframeObj = {
-          sinal: tfData.analysisinal: tfData.analysis.sinal,
+        responseTimeframes[tfKey] = {
+          sinal: tfData.analysis.sinal,
           probabilidade: tfData.analysis.probabilidade,
           adx: tfData.analysis.adx,
           rsi: tfData.analysis.rsi,
           preco_atual: tfData.analysis.preco_atual
         };
-        
-        // 🔥 Ad.sinal,
-          probabilidade: tfData.analysis.probabilidade,
-          adx: tfData.analysis.adx,
-          rsi: tfData.analysis.rsi,
-          preco_atual: tfData.analysis.preco_atual
-        };
-        
-        // 🔥 Adicionar timing APENAS para o timeframe relevante de cada modo
-        if (mode === 'SNIPER' && tfKeyicionar timing APENAS para o timeframe relevante de cada modo
-        if (mode === 'SNIPER' && tfKey === 'M1') {
-          timeframeObj.timing = m1Timing;
-        === 'M1') {
-          timeframeObj.timing = m1Timing;
-        } else if ( } else if (mode === 'CAÇADOR' && tfKey ===mode === 'CAÇADOR' && tfKey === 'M5') {
-          timeframeObj.timing 'M5') {
-          timeframeObj.timing = m5Timing;
-        } = m5Timing;
-        } else if (mode === 'PES else if (mode === 'PESCADOR' && tfKeyCADOR' && tfKey === 'M15') {
-          timeframeObj.timing = === 'M15') {
-          timeframeObj.timing = m15Timing;
-        m15Timing;
-        }
-        
-        responseTimeframes[tfKey] }
-        
-        responseTimeframes[tfKey] = timeframeObj;
       }
     });
 
-    const responseTime = timeframeObj;
-      }
-    });
-
-    const responseTime = Date.now() - start = Date.now() - startTime;
-    
-    const response = {
-      success: trueTime;
+    const responseTime = Date.now() - startTime;
     
     const response = {
       success: true,
       mode: mode,
-      modeDescription: TRAD,
-      mode: mode,
-      modeDescription: TRADING_MODES[mode].ING_MODES[mode].description,
-      consolidated: {
-        signaldescription,
+      modeDescription: TRADING_MODES[mode].description,
       consolidated: {
         signal: consolidated.signal,
         confidence: consolidated.confidence,
-: consolidated.signal,
-        confidence: consolidated.confidence,
-        agreement: agreement.ag        agreement: agreement.agreement,
-reement,
+        agreement: agreement.agreement,
         simpleMajority: consolidated.simpleMajority,
-        timeframes        simpleMajority: consolidated.simpleMajority,
-        timeframesAnalyzed: agreement.totalTimeAnalyzed: agreement.totalTimeframes,
-        sinal_premium: consolidated.sframes,
-        sinal_premium: consolidated.sinal_premium || null
-      },
-      agreementinal_premium || null
+        timeframesAnalyzed: agreement.totalTimeframes,
+        sinal_premium: consolidated.sinal_premium || null,
+        m1_timing: m1Timing
       },
       agreement: {
-        agreement: agreement: {
         agreement: agreement.agreement,
-        primarySignal:.agreement,
         primarySignal: agreement.primarySignal,
-        callCount agreement.primarySignal,
         callCount: agreement.callCount,
-        putCount: agreement.callCount,
         putCount: agreement.putCount,
-        totalTime: agreement.putCount,
         totalTimeframes: agreement.totalTimeframes
-     frames: agreement.totalTimeframes
       },
-      suggestion: {
-        action: suggestion.action,
-        },
       suggestion: {
         action: suggestion.action,
         reason: suggestion.reason,
-        entry: suggestion reason: suggestion.reason,
         entry: suggestion.entry,
-        stopLoss: suggestion.stopLoss.entry,
         stopLoss: suggestion.stopLoss,
-        takeProfit: suggestion.take,
         takeProfit: suggestion.takeProfit
       },
-      timeframes:Profit
-      },
       timeframes: responseTimeframes,
-      // responseTimeframes,
-      // 🔥 NOVO: Timings específicos por 🔥 NOVO: Timings específicos por modo no objeto global também
-      timing: {
-        modo no objeto global também
-      timing: {
-        m1: m m1: m1Timing,
-        m5: m5Timing1Timing,
-        m5: m5Timing,
-        m15: m15Timing
-      },
-,
-        m15: m15Timing
-      },
-      metadata: {
       metadata: {
         responseTimeMs: responseTime,
         timestamp: new Date().toISOString()
       }
     };
 
-        responseTimeMs: responseTime,
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    console.log(`✅ Análise concluída em ${response    console.log(`✅ Análise concluída em ${responseTime}Time}ms para modo ${mode} - ${agreement.totalTimems para modo ${mode} - ${agreement.totalTimeframes} TFs analisados`);
-    resframes} TFs analisados`);
+    console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados`);
     res.json(response);
 
-  } catch (error.json(response);
-
   } catch (error) {
-    console) {
-    console.error('❌ Erro na análise:', error.error('❌ Erro na análise:', error);
-    res.status(500).json({ 
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-  }
-});
-
-// =);
+    console.error('❌ Erro na análise:', error);
     res.status(500).json({ 
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -853,115 +553,61 @@ reement,
 });
 
 // ========== TRATAMENTO DE ROTAS NÃO ENCONTRADAS ==========
-app.use((req, res) =>========= TRATAMENTO DE ROTAS NÃO ENCONTRADAS ==========
 app.use((req, res) => {
-  res.status(404).json {
   res.status(404).json({ error: 'Rota não encontrada' });
 });
 
-// ========== MIDDLE({ error: 'Rota não encontrada' });
-});
-
-// =WARE DE ERRO GLOBAL ================== MIDDLEWARE DE ERRO GLOBAL ==========
-app.use((err, req, res, next)=
+// ========== MIDDLEWARE DE ERRO GLOBAL ==========
 app.use((err, req, res, next) => {
-  console.error('❌ Erro global:', => {
-  console.error('❌ Erro err);
-  res.status(500).json({ 
-    error: global:', err);
+  console.error('❌ Erro global:', err);
   res.status(500).json({ 
     error: 'Erro interno do servidor',
-    message 'Erro interno do servidor',
-    message: process: process.env.NODE_ENV === 'development' ?.env.NODE_ENV === 'development' ? err.message : undefined
-  });
-});
-
-// ========== INICIALIZAÇÃO DO SERVIDOR ==========
-const PORT = process.env.PORT err.message : undefined
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
 // ========== INICIALIZAÇÃO DO SERVIDOR ==========
 const PORT = process.env.PORT || 3000;
 
-const server = || 3000;
-
-const server = app.listen(PORT app.listen(PORT, async () => {
-  console.log, async () => {
- (`\n🚀 Servidor rod console.log(`\n🚀 Servidor rodando na porta ${PORT}`);
-  console.log(`ando na porta ${PORT}`);
-  console🎯 Modos.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES de trading disponíveis: ${Object.keys(TRADING_MODES).join).join(', ')}`);
-  console.log(`(', ')}`);
-  console.log(`⚙️ Modo: ${process.env.NODE_EN⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
-  
-  // Inicia a conexão com a Deriv
-V || 'development'}`);
+const server = app.listen(PORT, async () => {
+  console.log(`\n🚀 Servidor rodando na porta ${PORT}`);
+  console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
+  console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
   
   // Inicia a conexão com a Deriv
   try {
-    console.log('🔄 In  try {
-    console.log('🔄 Iniciando conexão persistente com aiciando conexão persistente com a Deriv...');
-    await getDeriv Deriv...');
+    console.log('🔄 Iniciando conexão persistente com a Deriv...');
     await getDerivClient();
-    console.log('✅ ConexãoClient();
     console.log('✅ Conexão persistente estabelecida e mantida');
- persistente estabelecida e mantida');
   } catch (err) {
-     } catch (err) {
-    console.error('❌ Falha ao console.error('❌ Falha ao estabelecer conexão persistente:', err);
-  estabelecer conexão persistente:', err);
+    console.error('❌ Falha ao estabelecer conexão persistente:', err);
   }
 });
 
 // Graceful shutdown
-process.on('SIG }
-});
-
-// Graceful shutdown
 process.on('SIGTERM', () => {
-  consoleTERM', () => {
-  console.log('\.log('\n🛑 Recebido SIGTERMn🛑 Recebido SIGTERM, encerrando conexões...');
-  
-  server.close, encerrando conexões...');
+  console.log('\n🛑 Recebido SIGTERM, encerrando conexões...');
   
   server.close(() => {
-    console.log(() => {
     console.log('✅ Servidor HTTP encerrado');
     
-    if('✅ Servidor HTTP encerrado');
-    
- (derivClient) {
-      deriv    if (derivClient) {
+    if (derivClient) {
       derivClient.disconnect();
-      console.log('✅ Cliente DerivClient.disconnect();
       console.log('✅ Cliente Deriv desconectado');
     }
     
-    if (redisClient desconectado');
-    }
-    
     if (redisClient) {
-      redisClient.) {
       redisClient.quit();
-      console.log('✅ Clquit();
-      console.log('✅ Cliente Redis desconectadoiente Redis desconectado');
-    }
-    
-    process.exit(');
+      console.log('✅ Cliente Redis desconectado');
     }
     
     process.exit(0);
   });
 });
 
-process.on('SIGINT', () =>0);
-  });
-});
-
 process.on('SIGINT', () => {
-  console.log('\n {
   console.log('\n🛑 Recebido SIGINT, encerrando...');
-🛑 Recebido SIGINT, encerrando  process.emit('SIGTERM');
+  process.emit('SIGTERM');
 });
 
 module.exports = app;
