@@ -282,6 +282,34 @@ class TrendResolver {
         };
     }
 
+    detectarCorrecaoComForca(h4MACDStructure, h1MACDStructure, h4ADX) {
+        if (h4MACDStructure.structuralBias !== "NEUTRAL" && 
+            h4MACDStructure.momentumBias !== h4MACDStructure.structuralBias) {
+            
+            if (h1MACDStructure.momentumBias === h4MACDStructure.momentumBias) {
+                return {
+                    isCorrection: true,
+                    strength: 'FORTE',
+                    confidence: 80,
+                    description: 'Correção forte confirmada por H1'
+                };
+            }
+            
+            return {
+                isCorrection: true,
+                strength: 'FRACA',
+                confidence: 50,
+                description: 'Correção fraca - H1 não confirma'
+            };
+        }
+        
+        return {
+            isCorrection: false,
+            strength: 'NENHUMA',
+            confidence: 0
+        };
+    }
+
     resolveMarketState(params) {
         const {
             h4MACDStructure,
