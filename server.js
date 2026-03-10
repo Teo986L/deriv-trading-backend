@@ -43,14 +43,15 @@ app.set('trust proxy', 1); // Resolve aviso do rate limit
 // ========== CONFIGURAÇÃO DO REDIS ==========
 let redisClient = null;
 
+// NOVO: TTL configurado por timeframe (0 = sem cache)
 const TTL_BY_TIMEFRAME = {
-  'M1': 30,
-  'M5': 60,
-  'M15': 120,
-  'M30': 180,
-  'H1': 300,
-  'H4': 600,
-  'H24': 1800
+  'M1': 0,      // Sem cache - dados em tempo real
+  'M5': 0,      // Sem cache - dados em tempo real
+  'M15': 30,    // 30 segundos
+  'M30': 45,    // 45 segundos
+  'H1': 120,    // 2 minutos
+  'H4': 300,    // 5 minutos
+  'H24': 1800   // 30 minutos
 };
 
 if (process.env.REDIS_URL) {
@@ -64,23 +65,57 @@ if (process.env.REDIS_URL) {
   console.log('⚠️ Redis não configurado - cache desativado');
 }
 
-// ========== FUNÇÃO PARA OBTER CANDLES COM CACHE ==========
+// ========== FUNÇÃO PARA OBTER CANDLES COM CACHE INTELIGENTE ==========
 async function getCandlesWithCache(client, symbol, tf) {
+  const ttl = TTL_BY_TIMEFRAME[tf.key];
+  
+  // Se TTL = 0, busca sempre dados novos (sem cache)
+  if (ttl === 0) {
+    console.log(`🔄 Sem cache para ${tf.key} - buscando dados em tempo real`);
+    try {
+      const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+      
+      if (!Array.isArray(candles)) {
+        console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
+        return candles;
+      }
+      
+      return candles;
+    } catch (error) {
+      console.error(`❌ Erro ao buscar ${tf.key} em tempo real:`, error.message);
+      throw error;
+    }
+  }
+
+  // Para timeframes com cache (>0), verifica Redis primeiro
   if (!redisClient || !redisClient.isReady) {
+    // Se Redis não está disponível, busca direto da Deriv
+    console.log(`⚠️ Redis indisponível - buscando ${tf.key} direto da Deriv`);
     return await client.getCandles(symbol, tf.candleCount, tf.seconds);
   }
 
   const cacheKey = `candles:${symbol}:${tf.key}`;
   
   try {
+    // Tenta buscar do cache com timestamp
     const cached = await redisClient.get(cacheKey);
     
     if (cached) {
-      console.log(`✅ Cache hit: ${cacheKey}`);
-      return JSON.parse(cached);
+      const { candles, timestamp } = JSON.parse(cached);
+      const ageInSeconds = (Date.now() - timestamp) / 1000;
+      
+      // Se os dados ainda são válidos (idade < TTL), retorna do cache
+      if (ageInSeconds < ttl) {
+        console.log(`✅ Cache hit: ${cacheKey} (${ageInSeconds.toFixed(1)}s atrás)`);
+        return candles;
+      }
+      
+      console.log(`⚠️ Cache expirado por idade: ${cacheKey} (${ageInSeconds.toFixed(1)}s > ${ttl}s)`);
+    } else {
+      console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
     }
     
-    console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
+    // Busca novos dados da Deriv
     const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
     
     if (!Array.isArray(candles)) {
@@ -88,12 +123,19 @@ async function getCandlesWithCache(client, symbol, tf) {
       return candles;
     }
     
-    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
-    await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
+    // Armazena no cache com timestamp
+    const cacheData = {
+      candles,
+      timestamp: Date.now()
+    };
+    
+    await redisClient.setEx(cacheKey, ttl, JSON.stringify(cacheData));
+    console.log(`💾 Cache atualizado: ${cacheKey} (válido por ${ttl}s)`);
     
     return candles;
   } catch (error) {
     console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
+    // Em caso de erro no cache, busca direto da Deriv como fallback
     return await client.getCandles(symbol, tf.candleCount, tf.seconds);
   }
 }
@@ -418,7 +460,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
         sinal_premium: consolidated.sinal_premium || null,
-        m1_timing: m1Timing // 👈 NOVO: timing de entrada M1
+        m1_timing: m1Timing // 👈 timing de entrada M1
       },
       agreement: {
         agreement: agreement.agreement,
