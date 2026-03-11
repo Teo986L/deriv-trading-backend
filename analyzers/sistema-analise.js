@@ -10,7 +10,7 @@ const AnaliseVelocidadeIndicadores = require('./velocidade');
 const ZonaDeOuroPremium = require('./zona-ouro');
 const MultiTimeframeManager = require('../multi-timeframe-manager');
 const { calcularRSI, calcularMACD, calcularADXCompleto, calcularVolatilidade } = require('../indicators');
-const { INDICATOR_CONFIG, TRADING_MODE, MARKET_STATE } = require('../config');
+const { INDICATOR_CONFIG, TRADING_MODE, MARKET_STATE, CANDLE_CLOSE_TOLERANCE } = require('../config');
 const { institutionalSniper } = require('../institutional-sniper');
 
 class AutomatedElliottTradingSystem {
@@ -47,6 +47,18 @@ class SistemaAnaliseInteligente {
         
         this.multiTimeframeManager = new MultiTimeframeManager();
         this.timeframesData = {};
+    }
+
+    getTimeframeSeconds(tf) {
+        const map = { M1: 60, M5: 300, M15: 900, M30: 1800, H1: 3600, H4: 14400, H24: 86400 };
+        return map[tf] || 300;
+    }
+
+    isCandleClosed(candle, tfSeconds) {
+        if (!candle || !candle.epoch) return true;
+        const now = Math.floor(Date.now() / 1000);
+        const candleEnd = candle.epoch + tfSeconds;
+        return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
     }
 
     calcularMediaSimples(precos, periodo) {
@@ -152,6 +164,15 @@ class SistemaAnaliseInteligente {
     async analisar(candles, timeframeKey = 'M5') {
         if (!candles || candles.length < 20) {
             return { erro: "Dados insuficientes (mínimo 20 candles)" };
+        }
+
+        const tfSeconds = this.getTimeframeSeconds(timeframeKey);
+        if (candles.length > 0 && !this.isCandleClosed(candles[candles.length - 1], tfSeconds)) {
+            console.log(`⚠️ Último candle de ${timeframeKey} descartado por estar aberto`);
+            candles = candles.slice(0, -1);
+            if (candles.length < 20) {
+                return { erro: "Dados insuficientes após descartar candle aberto" };
+            }
         }
 
         const fechamentos = candles.map(c => parseFloat(c.close));
