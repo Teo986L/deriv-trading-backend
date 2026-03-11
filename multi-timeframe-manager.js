@@ -254,7 +254,19 @@ class MultiTimeframeManager {
             return this.consolidateSignalsFallback();
         }
 
-        const primarySignal = callWeight > putWeight ? 'CALL' : (putWeight > callWeight ? 'PUT' : 'HOLD');
+        // ========== NOVA LÓGICA: EMPATE = HOLD ==========
+        let primarySignal = 'HOLD';
+        
+        if (callCount === 0 && putCount === 0) {
+            primarySignal = 'HOLD';
+        }
+        else if (callCount === putCount && callCount > 0) {
+            primarySignal = 'HOLD';
+            console.log(`⚖️ Empate detectado: ${callCount} CALL vs ${putCount} PUT → FORÇANDO HOLD`);
+        }
+        else {
+            primarySignal = callWeight > putWeight ? 'CALL' : 'PUT';
+        }
 
         let agreement = 0;
         if (primarySignal === 'CALL') {
@@ -271,7 +283,7 @@ class MultiTimeframeManager {
         } else if (primarySignal === 'PUT') {
             confidence = totalWeight > 0 ? putWeight / totalWeight : 0;
         } else {
-            confidence = totalConfidence / (timeframesCount * 100);
+            confidence = totalConfidence / (timeframesCount * 100) * 0.5;
         }
 
         const divergencias = this.detectarDivergencias();
