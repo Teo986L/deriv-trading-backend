@@ -8,7 +8,7 @@ const DerivClient = require('./deriv-client');
 const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
 const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
-const { API_TOKEN } = require('./config');
+const { API_TOKEN, CANDLE_CLOSE_TOLERANCE, SMOOTHING } = require('./config');
 
 const app = express();
 
@@ -45,13 +45,13 @@ let redisClient = null;
 
 // 🔥 TTLs ajustados para melhor performance
 const TTL_BY_TIMEFRAME = {
-  'M1': 10,      // Reduzido para 10s (dados muito voláteis)
-  'M5': 20,      // Reduzido para 20s
-  'M15': 30,     // Reduzido para 30s
-  'M30': 45,     // Reduzido para 45s
-  'H1': 60,      // Reduzido para 60s
-  'H4': 120,     // Reduzido para 120s
-  'H24': 300     // Reduzido para 300s (5 minutos)
+  'M1': 10,
+  'M5': 20,
+  'M15': 30,
+  'M30': 45,
+  'H1': 60,
+  'H4': 120,
+  'H24': 300
 };
 
 if (process.env.REDIS_URL) {
@@ -98,33 +98,47 @@ const ALL_TIMEFRAMES_CONFIG = {
   'H24': { key: 'H24', seconds: 86400, candleCount: 20, minRequired: 5 }
 };
 
+// ========== FUNÇÃO AUXILIAR PARA VERIFICAR SE CANDLE ESTÁ FECHADO ==========
+function isCandleClosed(candle, timeframeSeconds) {
+  if (!candle || !candle.epoch) return true;
+  const now = Math.floor(Date.now() / 1000);
+  const candleEnd = candle.epoch + timeframeSeconds;
+  return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
+}
+
 // ========== FUNÇÃO PARA OBTER CANDLES COM CACHE (COM FALLBACK) ==========
 async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
-  // Se Redis não está disponível ou força dados frescos, busca direto
   if (!redisClient || !redisClient.isReady || forceFresh) {
     console.log(`🔄 Buscando ${tf.key} direto da Deriv (sem cache)`);
-    return await client.getCandles(symbol, tf.candleCount, tf.seconds);
+    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+    if (!Array.isArray(candles)) {
+      console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
+      return candles;
+    }
+    const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
+    if (closedCandles.length < tf.minRequired) {
+      console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
+    }
+    return closedCandles;
   }
 
   const cacheKey = `candles:${symbol}:${tf.key}`;
   
   try {
-    // Verificar se há dados em cache
     const cached = await redisClient.get(cacheKey);
     
     if (cached) {
-      // Verificar TTL restante
       const ttl = await redisClient.ttl(cacheKey);
       console.log(`✅ Cache hit: ${cacheKey} (TTL: ${ttl}s)`);
       
-      // Se TTL for muito baixo, busca novos dados em background (não bloqueante)
       if (ttl < 5) {
         setTimeout(async () => {
           try {
-            const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+            const freshCandles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
             if (Array.isArray(freshCandles)) {
+              const closedCandles = freshCandles.filter(c => isCandleClosed(c, tf.seconds));
               const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
-              await redisClient.setEx(cacheKey, ttl, JSON.stringify(freshCandles));
+              await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
               console.log(`🔄 Cache atualizado em background: ${cacheKey}`);
             }
           } catch (err) {
@@ -137,22 +151,28 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
     }
     
     console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
-    const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
     
     if (!Array.isArray(candles)) {
       console.error(`❌ Resposta inválida da Deriv para ${cacheKey}: não é um array`);
       return candles;
     }
     
-    // Salvar no cache
-    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
-    await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
+    const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
     
-    return candles;
+    if (closedCandles.length < tf.minRequired) {
+      console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
+    }
+    
+    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
+    await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
+    
+    return closedCandles;
   } catch (error) {
     console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
-    // Fallback: busca direto da Deriv
-    return await client.getCandles(symbol, tf.candleCount, tf.seconds);
+    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+    if (!Array.isArray(candles)) return candles;
+    return candles.filter(c => isCandleClosed(c, tf.seconds));
   }
 }
 
@@ -342,7 +362,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
   const temTendenciaForte = adx >= 25;
 
   if (primarySignal === 'CALL') {
-    // Caso 1: Confirmação direta com tendência forte
     if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65 && temTendenciaForte) {
       return {
         permitido: true,
@@ -352,7 +371,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
     else if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65) {
       return {
         permitido: true,
@@ -362,7 +380,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 3: Possível reversão de oversold
     else if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi < 30) {
       return {
         permitido: true,
@@ -383,7 +400,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
     }
   }
   else if (primarySignal === 'PUT') {
-    // Caso 1: Confirmação direta com tendência forte
     if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35 && temTendenciaForte) {
       return {
         permitido: true,
@@ -393,7 +409,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
     else if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35) {
       return {
         permitido: true,
@@ -403,7 +418,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 3: Possível reversão de overbought
     else if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi > 70) {
       return {
         permitido: true,
@@ -448,7 +462,6 @@ function calcularTimingM5(m5Analysis, primarySignal) {
   const temTendenciaForte = adx >= 25;
 
   if (primarySignal === 'CALL') {
-    // Caso 1: Confirmação direta com tendência forte
     if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi < 65 && temTendenciaForte) {
       return {
         permitido: true,
@@ -458,7 +471,6 @@ function calcularTimingM5(m5Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
     else if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi < 65) {
       return {
         permitido: true,
@@ -468,7 +480,6 @@ function calcularTimingM5(m5Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 3: Possível reversão de oversold
     else if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi < 30) {
       return {
         permitido: true,
@@ -489,7 +500,6 @@ function calcularTimingM5(m5Analysis, primarySignal) {
     }
   }
   else if (primarySignal === 'PUT') {
-    // Caso 1: Confirmação direta com tendência forte
     if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi > 35 && temTendenciaForte) {
       return {
         permitido: true,
@@ -499,7 +509,6 @@ function calcularTimingM5(m5Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
     else if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi > 35) {
       return {
         permitido: true,
@@ -509,7 +518,6 @@ function calcularTimingM5(m5Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 3: Possível reversão de overbought
     else if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi > 70) {
       return {
         permitido: true,
@@ -554,7 +562,6 @@ function calcularTimingM15(m15Analysis, primarySignal) {
   const temTendenciaForte = adx >= 25;
 
   if (primarySignal === 'CALL') {
-    // Caso 1: Confirmação direta com tendência forte
     if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi < 65 && temTendenciaForte) {
       return {
         permitido: true,
@@ -564,7 +571,6 @@ function calcularTimingM15(m15Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
     else if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi < 65) {
       return {
         permitido: true,
@@ -574,7 +580,6 @@ function calcularTimingM15(m15Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 3: Possível reversão de oversold
     else if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi < 30) {
       return {
         permitido: true,
@@ -595,7 +600,6 @@ function calcularTimingM15(m15Analysis, primarySignal) {
     }
   }
   else if (primarySignal === 'PUT') {
-    // Caso 1: Confirmação direta com tendência forte
     if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi > 35 && temTendenciaForte) {
       return {
         permitido: true,
@@ -605,7 +609,6 @@ function calcularTimingM15(m15Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
     else if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi > 35) {
       return {
         permitido: true,
@@ -615,7 +618,6 @@ function calcularTimingM15(m15Analysis, primarySignal) {
         adx: adx
       };
     }
-    // Caso 3: Possível reversão de overbought
     else if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi > 70) {
       return {
         permitido: true,
@@ -668,29 +670,24 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
     const client = await getDerivClient();
 
-    // Filtra apenas os timeframes do modo selecionado
     const timeframesToAnalyze = TRADING_MODES[mode].timeframes
       .map(tfKey => ALL_TIMEFRAMES_CONFIG[tfKey]);
 
     const mtfManager = new MultiTimeframeManager();
     
-    // 🔥 Detectar tipo de ativo para passar ao sistema de análise
     const tipoAtivo = symbol.startsWith('R_') ? 'volatility_index' : 
                      (symbol.includes('frx') ? 'forex' : 'indice_normal');
     
     const sistemaBase = new SistemaAnaliseInteligente(symbol);
     
-    // 🔥 Passar tipo de ativo para o sistema de pesos
     if (sistemaBase.sistemaPesos && sistemaBase.sistemaPesos.setTipoAtivo) {
       sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
     }
 
-    // Processa timeframes sequencialmente
     for (const tf of timeframesToAnalyze) {
       try {
         console.log(`🔍 Analisando ${tf.key}...`);
         
-        // 🔥 Forçar dados frescos para timeframes curtos a cada 2 análises
         const forceFresh = (tf.key === 'M1' || tf.key === 'M5') && (Math.random() > 0.5);
         
         const candles = await getCandlesWithCache(client, symbol, tf, forceFresh);
@@ -719,7 +716,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
-    // Preço base para sugestão
     const firstTf = timeframesToAnalyze[0]?.key || 'M5';
     const basePrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
     
@@ -728,7 +724,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       basePrice
     );
 
-    // Calcular timings de entrada baseados nos timeframes disponíveis no modo
     let m1Timing = null, m5Timing = null, m15Timing = null;
     const primarySignal = consolidated.simpleMajority.signal;
 
@@ -745,7 +740,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       m15Timing = calcularTimingM15(m15Analysis, primarySignal);
     }
 
-    // Montar resposta apenas com os timeframes do modo selecionado
     const responseTimeframes = {};
     TRADING_MODES[mode].timeframes.forEach(tfKey => {
       const tfData = mtfManager.timeframes[tfKey];
@@ -810,12 +804,10 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
   }
 });
 
-// ========== TRATAMENTO DE ROTAS NÃO ENCONTRADAS ==========
 app.use((req, res) => {
   res.status(404).json({ error: 'Rota não encontrada' });
 });
 
-// ========== MIDDLEWARE DE ERRO GLOBAL ==========
 app.use((err, req, res, next) => {
   console.error('❌ Erro global:', err);
   res.status(500).json({ 
@@ -824,7 +816,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ========== INICIALIZAÇÃO DO SERVIDOR ==========
 const PORT = process.env.PORT || 3000;
 
 const server = app.listen(PORT, async () => {
@@ -832,7 +823,6 @@ const server = app.listen(PORT, async () => {
   console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
   console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
   
-  // Inicia a conexão com a Deriv
   try {
     console.log('🔄 Iniciando conexão persistente com a Deriv...');
     await getDerivClient();
@@ -842,7 +832,6 @@ const server = app.listen(PORT, async () => {
   }
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('\n🛑 Recebido SIGTERM, encerrando conexões...');
   
