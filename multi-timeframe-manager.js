@@ -1,4 +1,6 @@
 // multi-timeframe-manager.js
+const { SMOOTHING } = require('./config');
+
 class MultiTimeframeManager {
     constructor() {
         this.timeframes = {
@@ -12,8 +14,8 @@ class MultiTimeframeManager {
         };
         this.consolidatedSignal = { signal: 'HOLD', confidence: 0, agreement: 0, details: {} };
         this.allAnalyses = {};
+        this.signalHistory = {};
         
-        // Pesos base por timeframe (hierarquia)
         this.TF_BASE_WEIGHT = {
             'M1': 1.0,
             'M5': 1.5,
@@ -24,7 +26,6 @@ class MultiTimeframeManager {
             'H24': 4.0
         };
         
-        // Limiares de ADX para participação (mais permissivos para ativos voláteis)
         this.ADX_THRESHOLDS = {
             'M1': { min: 12, ignore_below: 8 },
             'M5': { min: 12, ignore_below: 8 },
@@ -40,7 +41,33 @@ class MultiTimeframeManager {
         if (this.timeframes[timeframeKey]) {
             this.timeframes[timeframeKey].analysis = analysis;
             this.allAnalyses[timeframeKey] = analysis;
+            
+            if (!this.signalHistory[timeframeKey]) {
+                this.signalHistory[timeframeKey] = [];
+            }
+            if (analysis && analysis.sinal) {
+                this.signalHistory[timeframeKey].push(analysis.sinal);
+                const smoothing = SMOOTHING[timeframeKey] || SMOOTHING.DEFAULT;
+                const maxSize = smoothing.historySize;
+                if (this.signalHistory[timeframeKey].length > maxSize) {
+                    this.signalHistory[timeframeKey] = this.signalHistory[timeframeKey].slice(-maxSize);
+                }
+            }
         }
+    }
+
+    getSmoothedSignal(timeframeKey) {
+        const history = this.signalHistory[timeframeKey];
+        if (!history || history.length === 0) return null;
+        const smoothing = SMOOTHING[timeframeKey] || SMOOTHING.DEFAULT;
+        if (history.length < smoothing.minAgreement) {
+            return history[history.length - 1];
+        }
+        const calls = history.filter(s => s === 'CALL').length;
+        const puts = history.filter(s => s === 'PUT').length;
+        if (calls >= smoothing.minAgreement) return 'CALL';
+        if (puts >= smoothing.minAgreement) return 'PUT';
+        return history[history.length - 1];
     }
 
     calcularPesoPorTF(timeframeKey, analysis) {
@@ -175,11 +202,15 @@ class MultiTimeframeManager {
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
             if (!analysis) continue;
             
+            const smoothedSignal = this.getSmoothedSignal(key);
+            const signalForWeight = smoothedSignal || analysis.sinal;
+            
             const weight = this.calcularPesoPorTF(key, analysis);
             
             if (weight === 0) {
                 details[key] = {
                     signal: analysis.sinal,
+                    smoothed: smoothedSignal,
                     confidence: (analysis.probabilidade * 100).toFixed(1) + '%',
                     price: analysis.preco_atual,
                     adx: analysis.adx,
@@ -190,10 +221,10 @@ class MultiTimeframeManager {
 
             totalWeight += weight;
 
-            if (analysis.sinal === 'CALL') {
+            if (signalForWeight === 'CALL') {
                 callCount++;
                 callWeight += weight * (analysis.probabilidade || 0.5);
-            } else if (analysis.sinal === 'PUT') {
+            } else if (signalForWeight === 'PUT') {
                 putCount++;
                 putWeight += weight * (analysis.probabilidade || 0.5);
             } else {
@@ -208,6 +239,7 @@ class MultiTimeframeManager {
 
             details[key] = {
                 signal: analysis.sinal,
+                smoothed: smoothedSignal,
                 confidence: (analysis.probabilidade * 100).toFixed(1) + '%',
                 price: analysis.preco_atual,
                 adx: analysis.adx,
