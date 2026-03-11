@@ -8,7 +8,7 @@ const DerivClient = require('./deriv-client');
 const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
 const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
-const { API_TOKEN, CANDLE_CLOSE_TOLERANCE, SMOOTHING } = require('./config');
+const { API_TOKEN } = require('./config');
 
 const app = express();
 
@@ -20,11 +20,11 @@ const SECRETS = {
   '180': process.env.SECRET_KEY_180_DAYS,
   '365': process.env.SECRET_KEY_365_DAYS
 };
-const ADMIN_SECRET = process.env.ADMIN_SECRET;
+const ADMIN_SECRET = process.env.ADMIN_SECRET || '1823';
 
 const allowedOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',')
-  : ['http://localhost:3000'];
+  : ['http://localhost:3000', 'https://seu-site.netlify.app'];
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -40,7 +40,7 @@ app.use(cors({
 app.use(express.json());
 app.set('trust proxy', 1);
 
-// ========== CONFIGURAÇÃO DO REDIS (OPCIONAL) ==========
+// ========== CONFIGURAÇÃO DO REDIS ==========
 let redisClient = null;
 
 const TTL_BY_TIMEFRAME = {
@@ -67,7 +67,136 @@ if (process.env.REDIS_URL) {
     redisClient = null;
   }
 } else {
-  console.log('⚠️ Redis não configurado - cache desativado');
+  console.log('⚠️ Redis não configurado - usando armazenamento em memória');
+}
+
+// ========== ARMAZENAMENTO DE TOKENS E BROADCASTS ==========
+let tokenStore = [];
+let broadcastStore = [];
+let userLogsStore = {};
+let allLogsStore = [];
+let blockedTokensStore = new Set();
+let clientActivityStore = new Map();
+
+async function saveToken(tokenData) {
+  const { token, userId, periodDays, createdAt, expiresAt } = tokenData;
+  if (redisClient && redisClient.isReady) {
+    const key = `token:${userId}`;
+    await redisClient.hSet(key, {
+      token,
+      userId,
+      periodDays: periodDays.toString(),
+      createdAt: createdAt.toISOString(),
+      expiresAt: expiresAt.toISOString()
+    });
+    await redisClient.lPush('tokens:list', JSON.stringify({ userId, token, periodDays, createdAt, expiresAt }));
+    await redisClient.expire(key, periodDays * 24 * 60 * 60);
+  } else {
+    tokenStore.push({ userId, token, periodDays, createdAt, expiresAt });
+  }
+}
+
+async function listTokens() {
+  if (redisClient && redisClient.isReady) {
+    const tokens = await redisClient.lRange('tokens:list', 0, -1);
+    return tokens.map(t => JSON.parse(t));
+  } else {
+    return tokenStore;
+  }
+}
+
+async function saveBroadcast(broadcast) {
+  const { id, type, message, recipients, createdAt } = broadcast;
+  if (redisClient && redisClient.isReady) {
+    await redisClient.lPush('broadcasts:list', JSON.stringify(broadcast));
+    await redisClient.lTrim('broadcasts:list', 0, 99);
+  } else {
+    broadcastStore.unshift(broadcast);
+    if (broadcastStore.length > 100) broadcastStore.pop();
+  }
+}
+
+async function listBroadcasts(limit = 50) {
+  if (redisClient && redisClient.isReady) {
+    const broadcasts = await redisClient.lRange('broadcasts:list', 0, limit - 1);
+    return broadcasts.map(b => JSON.parse(b));
+  } else {
+    return broadcastStore.slice(0, limit);
+  }
+}
+
+async function recordClientActivity(userId) {
+  const now = new Date().toISOString();
+  if (redisClient && redisClient.isReady) {
+    await redisClient.hSet('clients:activity', userId, now);
+    await redisClient.zAdd('clients:active', { score: Date.now(), value: userId });
+    await redisClient.zRemRangeByScore('clients:active', 0, Date.now() - 3600000); // limpar após 1h
+  } else {
+    clientActivityStore.set(userId, now);
+  }
+}
+
+async function getActiveClients(minutes = 5) {
+  const cutoff = Date.now() - minutes * 60 * 1000;
+  if (redisClient && redisClient.isReady) {
+    const active = await redisClient.zRangeByScore('clients:active', cutoff, '+inf');
+    return active;
+  } else {
+    const active = [];
+    for (const [userId, last] of clientActivityStore.entries()) {
+      if (new Date(last).getTime() > cutoff) active.push(userId);
+    }
+    return active;
+  }
+}
+
+async function logUserActivity(userId, action, details = {}) {
+  const logEntry = {
+    userId,
+    action,
+    timestamp: new Date().toISOString(),
+    details
+  };
+  
+  if (redisClient && redisClient.isReady) {
+    const key = `logs:${userId}`;
+    await redisClient.lPush(key, JSON.stringify(logEntry));
+    await redisClient.lTrim(key, 0, 99);
+    await redisClient.lPush('logs:all', JSON.stringify(logEntry));
+    await redisClient.lTrim('logs:all', 0, 999);
+  } else {
+    if (!userLogsStore[userId]) userLogsStore[userId] = [];
+    userLogsStore[userId].unshift(logEntry);
+    if (userLogsStore[userId].length > 100) userLogsStore[userId].pop();
+    
+    allLogsStore.unshift(logEntry);
+    if (allLogsStore.length > 1000) allLogsStore.pop();
+  }
+}
+
+async function isTokenBlocked(userId) {
+  if (redisClient && redisClient.isReady) {
+    const blocked = await redisClient.get(`blocked:${userId}`);
+    return blocked === '1';
+  } else {
+    return blockedTokensStore.has(userId);
+  }
+}
+
+async function setTokenBlocked(userId, blocked) {
+  if (redisClient && redisClient.isReady) {
+    if (blocked) {
+      await redisClient.set(`blocked:${userId}`, '1');
+    } else {
+      await redisClient.del(`blocked:${userId}`);
+    }
+  } else {
+    if (blocked) {
+      blockedTokensStore.add(userId);
+    } else {
+      blockedTokensStore.delete(userId);
+    }
+  }
 }
 
 // ========== DEFINIÇÃO DOS MODOS DE TRADING ==========
@@ -81,7 +210,7 @@ const TRADING_MODES = {
     description: 'Ondas médias de 15-60 minutos'
   },
   'PESCADOR': {
-    timeframes: ['M15', 'H1', 'H4', 'H24'],
+    timeframes: ['M15', 'H1', 'H4'],
     description: 'Grandes movimentos de horas a dias'
   }
 };
@@ -96,82 +225,7 @@ const ALL_TIMEFRAMES_CONFIG = {
   'H24': { key: 'H24', seconds: 86400, candleCount: 20, minRequired: 5 }
 };
 
-function isCandleClosed(candle, timeframeSeconds) {
-  if (!candle || !candle.epoch) return true;
-  const now = Math.floor(Date.now() / 1000);
-  const candleEnd = candle.epoch + timeframeSeconds;
-  return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
-}
-
-async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
-  if (!redisClient || !redisClient.isReady || forceFresh) {
-    console.log(`🔄 Buscando ${tf.key} direto da Deriv (sem cache)`);
-    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
-    if (!Array.isArray(candles)) {
-      console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
-      return candles;
-    }
-    const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
-    if (closedCandles.length < tf.minRequired) {
-      console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
-    }
-    return closedCandles;
-  }
-
-  const cacheKey = `candles:${symbol}:${tf.key}`;
-  
-  try {
-    const cached = await redisClient.get(cacheKey);
-    
-    if (cached) {
-      const ttl = await redisClient.ttl(cacheKey);
-      console.log(`✅ Cache hit: ${cacheKey} (TTL: ${ttl}s)`);
-      
-      if (ttl < 5) {
-        setTimeout(async () => {
-          try {
-            const freshCandles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
-            if (Array.isArray(freshCandles)) {
-              const closedCandles = freshCandles.filter(c => isCandleClosed(c, tf.seconds));
-              const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
-              await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
-              console.log(`🔄 Cache atualizado em background: ${cacheKey}`);
-            }
-          } catch (err) {
-            console.error(`❌ Erro atualizando cache em background: ${err.message}`);
-          }
-        }, 0);
-      }
-      
-      return JSON.parse(cached);
-    }
-    
-    console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
-    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
-    
-    if (!Array.isArray(candles)) {
-      console.error(`❌ Resposta inválida da Deriv para ${cacheKey}: não é um array`);
-      return candles;
-    }
-    
-    const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
-    
-    if (closedCandles.length < tf.minRequired) {
-      console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
-    }
-    
-    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
-    await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
-    
-    return closedCandles;
-  } catch (error) {
-    console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
-    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
-    if (!Array.isArray(candles)) return candles;
-    return candles.filter(c => isCandleClosed(c, tf.seconds));
-  }
-}
-
+// ========== RATE LIMITERS ==========
 const analyzeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -184,7 +238,8 @@ const adminLimiter = rateLimit({
   message: { error: 'Limite de geração de tokens excedido.' }
 });
 
-function authenticateToken(req, res, next) {
+// ========== MIDDLEWARE DE AUTENTICAÇÃO ==========
+async function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   let token = authHeader && authHeader.split(' ')[1];
   
@@ -208,8 +263,17 @@ function authenticateToken(req, res, next) {
     if (!key) continue;
     try {
       const decoded = jwt.verify(token, key);
+      
+      const blocked = await isTokenBlocked(decoded.userId);
+      if (blocked) {
+        return res.status(403).json({ error: 'Token bloqueado pelo administrador' });
+      }
+      
       req.user = decoded;
       req.tokenPeriod = period;
+      
+      await recordClientActivity(decoded.userId);
+      
       return next();
     } catch (err) {}
   }
@@ -217,6 +281,15 @@ function authenticateToken(req, res, next) {
   return res.status(403).json({ error: 'Token inválido ou expirado' });
 }
 
+function authenticateAdmin(req, res, next) {
+  const adminKey = req.headers['x-admin-key'] || req.body.adminKey;
+  if (!adminKey || adminKey !== ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
+  next();
+}
+
+// ========== INSTÂNCIA DO CLIENTE DERIV ==========
 let derivClient = null;
 let derivConnectionPromise = null;
 
@@ -243,127 +316,59 @@ async function getDerivClient() {
   return derivConnectionPromise;
 }
 
-// ========== NOVA FUNÇÃO: OBTER PREÇO ATUAL VIA TICK ==========
-async function getCurrentPrice(client, symbol) {
-  return new Promise((resolve) => {
-    // Timeout de 2 segundos
-    const timeout = setTimeout(() => {
-      console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
-      resolve(null);
-    }, 2000);
+// ========== FUNÇÃO PARA OBTER CANDLES COM CACHE ==========
+async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
+  if (!redisClient || !redisClient.isReady || forceFresh) {
+    console.log(`🔄 Buscando ${tf.key} direto da Deriv (sem cache)`);
+    return await client.getCandles(symbol, tf.candleCount, tf.seconds);
+  }
 
-    const reqId = Date.now();
-    const handler = (response) => {
-      if (response.error) {
-        console.log(`⚠️ Erro no tick: ${response.error.message}`);
-        clearTimeout(timeout);
-        client.removeListener(reqId);
-        resolve(null);
-      } else if (response.tick && response.tick.symbol === symbol) {
-        clearTimeout(timeout);
-        client.removeListener(reqId);
-        resolve(response.tick.quote);
-      }
-    };
+  const cacheKey = `candles:${symbol}:${tf.key}`;
+  
+  try {
+    const cached = await redisClient.get(cacheKey);
     
-    client.addListener(reqId, handler);
-    client.send({ tick: symbol, req_id: reqId });
-  });
+    if (cached) {
+      const ttl = await redisClient.ttl(cacheKey);
+      console.log(`✅ Cache hit: ${cacheKey} (TTL: ${ttl}s)`);
+      
+      if (ttl < 5) {
+        setTimeout(async () => {
+          try {
+            const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+            if (Array.isArray(freshCandles)) {
+              const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
+              await redisClient.setEx(cacheKey, ttl, JSON.stringify(freshCandles));
+              console.log(`🔄 Cache atualizado em background: ${cacheKey}`);
+            }
+          } catch (err) {
+            console.error(`❌ Erro atualizando cache em background: ${err.message}`);
+          }
+        }, 0);
+      }
+      
+      return JSON.parse(cached);
+    }
+    
+    console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
+    const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+    
+    if (!Array.isArray(candles)) {
+      console.error(`❌ Resposta inválida da Deriv para ${cacheKey}: não é um array`);
+      return candles;
+    }
+    
+    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
+    await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
+    
+    return candles;
+  } catch (error) {
+    console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
+    return await client.getCandles(symbol, tf.candleCount, tf.seconds);
+  }
 }
 
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
-});
-
-app.get('/api/trading-modes', (req, res) => {
-  res.json({
-    success: true,
-    modes: Object.keys(TRADING_MODES).map(key => ({
-      id: key,
-      name: key,
-      description: TRADING_MODES[key].description,
-      timeframes: TRADING_MODES[key].timeframes
-    }))
-  });
-});
-
-app.post('/api/validate-token', (req, res) => {
-  const { token } = req.body;
-  
-  if (!token) {
-    return res.status(400).json({ valid: false, message: 'Token não fornecido' });
-  }
-
-  const secretsToTry = [
-    { period: 365, key: SECRETS['365'] },
-    { period: 180, key: SECRETS['180'] },
-    { period: 90, key: SECRETS['90'] },
-    { period: 30, key: SECRETS['30'] },
-    { period: 7, key: SECRETS['7'] }
-  ];
-
-  for (const { period, key } of secretsToTry) {
-    if (!key) continue;
-    try {
-      const decoded = jwt.verify(token, key);
-      return res.json({
-        valid: true,
-        periodDays: period,
-        expiresAt: decoded.exp,
-        userId: decoded.userId || null
-      });
-    } catch (err) {}
-  }
-
-  return res.status(401).json({ valid: false, message: 'Token inválido ou expirado' });
-});
-
-app.post('/api/admin/generate-token', adminLimiter, (req, res) => {
-  const { adminKey, periodDays, userId } = req.body;
-
-  if (!adminKey || adminKey !== ADMIN_SECRET) {
-    return res.status(403).json({ error: 'Chave de administrador inválida' });
-  }
-
-  const period = parseInt(periodDays);
-  if (![7, 30, 90, 180, 365].includes(period)) {
-    return res.status(400).json({ error: 'Período inválido. Use 7, 30, 90, 180 ou 365.' });
-  }
-
-  const secret = SECRETS[period.toString()];
-  if (!secret) {
-    return res.status(500).json({ error: 'Chave para o período não configurada no servidor' });
-  }
-
-  const { randomUUID } = require('crypto');
-  const finalUserId = userId || randomUUID();
-  const jti = randomUUID();
-
-  const payload = {
-    userId: finalUserId,
-    period,
-    jti
-  };
-
-  const expiresInSeconds = period * 24 * 60 * 60;
-  const token = jwt.sign(payload, secret, { expiresIn: expiresInSeconds });
-
-  res.json({
-    success: true,
-    token,
-    periodDays: period,
-    expiresIn: expiresInSeconds,
-    userId: finalUserId
-  });
-});
-
-app.get('/api/connection-status', authenticateToken, (req, res) => {
-  if (!derivClient) {
-    return res.json({ status: 'not_initialized' });
-  }
-  res.json(derivClient.getConnectionStatus());
-});
-
+// ========== FUNÇÕES PARA CALCULAR TIMING DE ENTRADA ==========
 function calcularTimingM1(m1Analysis, primarySignal) {
   if (!m1Analysis || primarySignal === 'HOLD') {
     return {
@@ -664,20 +669,266 @@ function calcularTimingM15(m15Analysis, primarySignal) {
   };
 }
 
-function getPriceSource(mtfManager) {
-  if (mtfManager.timeframes['M1']?.analysis?.preco_atual) return 'M1';
-  if (mtfManager.timeframes['M5']?.analysis?.preco_atual) return 'M5';
-  if (mtfManager.timeframes['M15']?.analysis?.preco_atual) return 'M15';
-  if (mtfManager.timeframes['H1']?.analysis?.preco_atual) return 'H1';
-  if (mtfManager.timeframes['H4']?.analysis?.preco_atual) return 'H4';
-  return 'unknown';
-}
+// ========== ROTAS PÚBLICAS ==========
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
 
+app.get('/api/trading-modes', (req, res) => {
+  res.json({
+    success: true,
+    modes: Object.keys(TRADING_MODES).map(key => ({
+      id: key,
+      name: key,
+      description: TRADING_MODES[key].description,
+      timeframes: TRADING_MODES[key].timeframes
+    }))
+  });
+});
+
+app.post('/api/validate-token', (req, res) => {
+  const { token } = req.body;
+  
+  if (!token) {
+    return res.status(400).json({ valid: false, message: 'Token não fornecido' });
+  }
+
+  const secretsToTry = [
+    { period: 365, key: SECRETS['365'] },
+    { period: 180, key: SECRETS['180'] },
+    { period: 90, key: SECRETS['90'] },
+    { period: 30, key: SECRETS['30'] },
+    { period: 7, key: SECRETS['7'] }
+  ];
+
+  for (const { period, key } of secretsToTry) {
+    if (!key) continue;
+    try {
+      const decoded = jwt.verify(token, key);
+      return res.json({
+        valid: true,
+        periodDays: period,
+        expiresAt: decoded.exp,
+        userId: decoded.userId || null
+      });
+    } catch (err) {}
+  }
+
+  return res.status(401).json({ valid: false, message: 'Token inválido ou expirado' });
+});
+
+// ========== ROTAS DE ADMIN ==========
+app.post('/api/admin/generate-token', adminLimiter, async (req, res) => {
+  const { adminKey, periodDays, userId } = req.body;
+
+  if (!adminKey || adminKey !== ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Chave de administrador inválida' });
+  }
+
+  const period = parseInt(periodDays);
+  if (![7, 30, 90, 180, 365].includes(period)) {
+    return res.status(400).json({ error: 'Período inválido. Use 7, 30, 90, 180 ou 365.' });
+  }
+
+  const secret = SECRETS[period.toString()];
+  if (!secret) {
+    return res.status(500).json({ error: 'Chave para o período não configurada no servidor' });
+  }
+
+  const { randomUUID } = require('crypto');
+  const finalUserId = userId || randomUUID();
+  const jti = randomUUID();
+
+  const payload = {
+    userId: finalUserId,
+    period,
+    jti
+  };
+
+  const expiresInSeconds = period * 24 * 60 * 60;
+  const token = jwt.sign(payload, secret, { expiresIn: expiresInSeconds });
+
+  const createdAt = new Date();
+  const expiresAt = new Date(createdAt.getTime() + expiresInSeconds * 1000);
+  await saveToken({ token, userId: finalUserId, periodDays: period, createdAt, expiresAt });
+
+  res.json({
+    success: true,
+    token,
+    periodDays: period,
+    expiresIn: expiresInSeconds,
+    userId: finalUserId
+  });
+});
+
+app.get('/api/admin/tokens', authenticateAdmin, async (req, res) => {
+  try {
+    const tokens = await listTokens();
+    const tokensWithStatus = await Promise.all(tokens.map(async t => ({
+      ...t,
+      expired: new Date(t.expiresAt) < new Date(),
+      blocked: await isTokenBlocked(t.userId)
+    })));
+    res.json({ success: true, tokens: tokensWithStatus });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/toggle-block', authenticateAdmin, async (req, res) => {
+  const { userId, block } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId obrigatório' });
+
+  try {
+    await setTokenBlocked(userId, block);
+    await logUserActivity('admin', 'toggle-block', { userId, block });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/broadcast', authenticateAdmin, async (req, res) => {
+  const { type, message } = req.body;
+  if (!type || !message) {
+    return res.status(400).json({ error: 'Tipo e mensagem são obrigatórios' });
+  }
+
+  const activeClients = await getActiveClients(60);
+  const recipientCount = activeClients.length;
+
+  const broadcast = {
+    id: Date.now().toString(),
+    type,
+    message,
+    recipients: recipientCount,
+    createdAt: new Date().toISOString()
+  };
+
+  await saveBroadcast(broadcast);
+  await logUserActivity('admin', 'broadcast', { type, message, recipients: recipientCount });
+
+  res.json({ success: true, broadcast });
+});
+
+app.get('/api/admin/broadcasts', authenticateAdmin, async (req, res) => {
+  try {
+    const broadcasts = await listBroadcasts(50);
+    res.json({ success: true, broadcasts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
+  try {
+    const tokens = await listTokens();
+    const activeTokens = tokens.filter(t => new Date(t.expiresAt) > new Date());
+    const activeClients = await getActiveClients(5);
+    const broadcasts = await listBroadcasts(1);
+
+    res.json({
+      success: true,
+      stats: {
+        totalTokens: tokens.length,
+        activeTokens: activeTokens.length,
+        expiredTokens: tokens.length - activeTokens.length,
+        activeClients: activeClients.length,
+        totalBroadcasts: broadcasts.length
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/active-users', authenticateAdmin, async (req, res) => {
+  const { minutes = 5 } = req.query;
+  try {
+    const activeUsers = await getActiveClients(parseInt(minutes));
+    
+    const tokens = await listTokens();
+    const usersWithDetails = [];
+    
+    for (const userId of activeUsers) {
+      const tokenInfo = tokens.find(t => t.userId === userId) || {};
+      let lastActive = '';
+      if (redisClient && redisClient.isReady) {
+        lastActive = await redisClient.hGet('clients:activity', userId) || 'unknown';
+      } else {
+        lastActive = clientActivityStore.get(userId) || 'unknown';
+      }
+      
+      usersWithDetails.push({
+        userId,
+        lastActive,
+        ...tokenInfo
+      });
+    }
+    
+    res.json({ success: true, users: usersWithDetails });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/logs/:userId', authenticateAdmin, async (req, res) => {
+  const { userId } = req.params;
+  try {
+    let logs = [];
+    if (redisClient && redisClient.isReady) {
+      const rawLogs = await redisClient.lRange(`logs:${userId}`, 0, 99);
+      logs = rawLogs.map(l => JSON.parse(l));
+    } else {
+      logs = userLogsStore[userId] || [];
+    }
+    res.json({ success: true, logs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/logs', authenticateAdmin, async (req, res) => {
+  const { limit = 100 } = req.query;
+  try {
+    let logs = [];
+    if (redisClient && redisClient.isReady) {
+      const rawLogs = await redisClient.lRange('logs:all', 0, parseInt(limit) - 1);
+      logs = rawLogs.map(l => JSON.parse(l));
+    } else {
+      logs = allLogsStore.slice(0, limit);
+    }
+    res.json({ success: true, logs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== ROTA PARA CLIENTES OBTEREM NOTIFICAÇÕES ==========
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  try {
+    const broadcasts = await listBroadcasts(20);
+    res.json({ success: true, notifications: broadcasts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== ROTA PARA VERIFICAR STATUS DA CONEXÃO ==========
+app.get('/api/connection-status', authenticateToken, (req, res) => {
+  if (!derivClient) {
+    return res.json({ status: 'not_initialized' });
+  }
+  res.json(derivClient.getConnectionStatus());
+});
+
+// ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
   
   try {
     const { symbol, mode } = req.body;
+    const userId = req.user.userId;
     
     if (!symbol) {
       return res.status(400).json({ error: 'Símbolo é obrigatório' });
@@ -689,6 +940,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         availableModes: Object.keys(TRADING_MODES)
       });
     }
+
+    await logUserActivity(userId, 'analyze', { symbol, mode });
 
     console.log(`\n🎯 Modo selecionado: ${mode} - ${TRADING_MODES[mode].description}`);
     console.log(`📊 Timeframes a analisar: ${TRADING_MODES[mode].timeframes.join(', ')}`);
@@ -741,56 +994,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
-    // ========== PREÇO EM TEMPO REAL (VIA TICK) ==========
-    let currentPrice = 0;
-    let priceSource = 'unknown';
-
-    // 1. Tenta obter o tick atual (tempo real)
-    try {
-      const tickPrice = await getCurrentPrice(client, symbol);
-      if (tickPrice) {
-        currentPrice = tickPrice;
-        priceSource = 'tick';
-        console.log(`💰 Preço via tick: ${currentPrice}`);
-      }
-    } catch (error) {
-      console.log(`⚠️ Erro ao obter tick: ${error.message}`);
-    }
-
-    // 2. Se não conseguiu tick, usa o preço do M1 (mais atual entre os candles)
-    if (!currentPrice) {
-      if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
-        currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
-        priceSource = 'M1';
-        console.log(`💰 Preço via M1: ${currentPrice}`);
-      } else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) {
-        currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual;
-        priceSource = 'M5';
-        console.log(`💰 Preço via M5: ${currentPrice}`);
-      } else if (mtfManager.timeframes['M15']?.analysis?.preco_atual) {
-        currentPrice = mtfManager.timeframes['M15'].analysis.preco_atual;
-        priceSource = 'M15';
-        console.log(`💰 Preço via M15: ${currentPrice}`);
-      } else if (mtfManager.timeframes['H1']?.analysis?.preco_atual) {
-        currentPrice = mtfManager.timeframes['H1'].analysis.preco_atual;
-        priceSource = 'H1';
-        console.log(`💰 Preço via H1: ${currentPrice}`);
-      } else if (mtfManager.timeframes['H4']?.analysis?.preco_atual) {
-        currentPrice = mtfManager.timeframes['H4'].analysis.preco_atual;
-        priceSource = 'H4';
-        console.log(`💰 Preço via H4: ${currentPrice}`);
-      } else {
-        const firstTf = timeframesToAnalyze[0]?.key || 'M5';
-        currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
-        priceSource = firstTf;
-        console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
-      }
-    }
-
-    // Gerar sugestão com o preço atual
+    const firstTf = timeframesToAnalyze[0]?.key || 'M5';
+    const basePrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
+    
     const suggestion = BotExecutionCore.generateEntrySuggestion(
       { sinal: consolidated.simpleMajority.signal, probabilidade: agreement.agreement / 100 },
-      currentPrice
+      basePrice
     );
 
     let m1Timing = null, m5Timing = null, m15Timing = null;
@@ -836,8 +1045,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
         sinal_premium: consolidated.sinal_premium || null,
-        price: currentPrice,
-        priceSource: priceSource, // Para debug
         ...(m1Timing && { m1_timing: m1Timing }),
         ...(m5Timing && { m5_timing: m5Timing }),
         ...(m15Timing && { m15_timing: m15Timing })
@@ -863,7 +1070,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       }
     };
 
-    console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Preço fonte: ${priceSource}`);
+    console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados`);
     res.json(response);
 
   } catch (error) {
@@ -875,10 +1082,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
   }
 });
 
+// ========== TRATAMENTO DE ROTAS NÃO ENCONTRADAS ==========
 app.use((req, res) => {
   res.status(404).json({ error: 'Rota não encontrada' });
 });
 
+// ========== MIDDLEWARE DE ERRO GLOBAL ==========
 app.use((err, req, res, next) => {
   console.error('❌ Erro global:', err);
   res.status(500).json({ 
@@ -887,6 +1096,7 @@ app.use((err, req, res, next) => {
   });
 });
 
+// ========== INICIALIZAÇÃO DO SERVIDOR ==========
 const PORT = process.env.PORT || 3000;
 
 const server = app.listen(PORT, async () => {
@@ -903,6 +1113,7 @@ const server = app.listen(PORT, async () => {
   }
 });
 
+// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('\n🛑 Recebido SIGTERM, encerrando conexões...');
   
