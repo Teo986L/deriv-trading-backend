@@ -43,7 +43,6 @@ app.set('trust proxy', 1);
 // ========== CONFIGURAÇÃO DO REDIS (OPCIONAL) ==========
 let redisClient = null;
 
-// 🔥 TTLs ajustados para melhor performance
 const TTL_BY_TIMEFRAME = {
   'M1': 10,
   'M5': 20,
@@ -87,7 +86,6 @@ const TRADING_MODES = {
   }
 };
 
-// Configurações completas de cada timeframe
 const ALL_TIMEFRAMES_CONFIG = {
   'M1': { key: 'M1', seconds: 60, candleCount: 60, minRequired: 20 },
   'M5': { key: 'M5', seconds: 300, candleCount: 72, minRequired: 30 },
@@ -98,7 +96,6 @@ const ALL_TIMEFRAMES_CONFIG = {
   'H24': { key: 'H24', seconds: 86400, candleCount: 20, minRequired: 5 }
 };
 
-// ========== FUNÇÃO AUXILIAR PARA VERIFICAR SE CANDLE ESTÁ FECHADO ==========
 function isCandleClosed(candle, timeframeSeconds) {
   if (!candle || !candle.epoch) return true;
   const now = Math.floor(Date.now() / 1000);
@@ -106,7 +103,6 @@ function isCandleClosed(candle, timeframeSeconds) {
   return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
 }
 
-// ========== FUNÇÃO PARA OBTER CANDLES COM CACHE (COM FALLBACK) ==========
 async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
   if (!redisClient || !redisClient.isReady || forceFresh) {
     console.log(`🔄 Buscando ${tf.key} direto da Deriv (sem cache)`);
@@ -176,7 +172,6 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
   }
 }
 
-// ========== RATE LIMITERS ==========
 const analyzeLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -189,7 +184,6 @@ const adminLimiter = rateLimit({
   message: { error: 'Limite de geração de tokens excedido.' }
 });
 
-// ========== MIDDLEWARE DE AUTENTICAÇÃO ==========
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   let token = authHeader && authHeader.split(' ')[1];
@@ -223,7 +217,6 @@ function authenticateToken(req, res, next) {
   return res.status(403).json({ error: 'Token inválido ou expirado' });
 }
 
-// ========== INSTÂNCIA DO CLIENTE DERIV COM CONEXÃO PERSISTENTE ==========
 let derivClient = null;
 let derivConnectionPromise = null;
 
@@ -250,7 +243,34 @@ async function getDerivClient() {
   return derivConnectionPromise;
 }
 
-// ========== ROTAS PÚBLICAS ==========
+// ========== NOVA FUNÇÃO: OBTER PREÇO ATUAL VIA TICK ==========
+async function getCurrentPrice(client, symbol) {
+  return new Promise((resolve) => {
+    // Timeout de 2 segundos
+    const timeout = setTimeout(() => {
+      console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
+      resolve(null);
+    }, 2000);
+
+    const reqId = Date.now();
+    const handler = (response) => {
+      if (response.error) {
+        console.log(`⚠️ Erro no tick: ${response.error.message}`);
+        clearTimeout(timeout);
+        client.removeListener(reqId);
+        resolve(null);
+      } else if (response.tick && response.tick.symbol === symbol) {
+        clearTimeout(timeout);
+        client.removeListener(reqId);
+        resolve(response.tick.quote);
+      }
+    };
+    
+    client.addListener(reqId, handler);
+    client.send({ tick: symbol, req_id: reqId });
+  });
+}
+
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
 });
@@ -298,7 +318,6 @@ app.post('/api/validate-token', (req, res) => {
   return res.status(401).json({ valid: false, message: 'Token inválido ou expirado' });
 });
 
-// ========== ROTA DE ADMIN PARA GERAR TOKENS ==========
 app.post('/api/admin/generate-token', adminLimiter, (req, res) => {
   const { adminKey, periodDays, userId } = req.body;
 
@@ -338,7 +357,6 @@ app.post('/api/admin/generate-token', adminLimiter, (req, res) => {
   });
 });
 
-// ========== ROTA PARA VERIFICAR STATUS DA CONEXÃO ==========
 app.get('/api/connection-status', authenticateToken, (req, res) => {
   if (!derivClient) {
     return res.json({ status: 'not_initialized' });
@@ -346,7 +364,6 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
   res.json(derivClient.getConnectionStatus());
 });
 
-// ========== FUNÇÕES PARA CALCULAR TIMING DE ENTRADA COM ADX ==========
 function calcularTimingM1(m1Analysis, primarySignal) {
   if (!m1Analysis || primarySignal === 'HOLD') {
     return {
@@ -647,7 +664,6 @@ function calcularTimingM15(m15Analysis, primarySignal) {
   };
 }
 
-// ========== FUNÇÃO AUXILIAR PARA IDENTIFICAR FONTE DO PREÇO ==========
 function getPriceSource(mtfManager) {
   if (mtfManager.timeframes['M1']?.analysis?.preco_atual) return 'M1';
   if (mtfManager.timeframes['M5']?.analysis?.preco_atual) return 'M5';
@@ -657,7 +673,6 @@ function getPriceSource(mtfManager) {
   return 'unknown';
 }
 
-// ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
   
@@ -726,46 +741,58 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
-    // ========== PREÇO EM TEMPO REAL (UNIFICADO) ==========
+    // ========== PREÇO EM TEMPO REAL (VIA TICK) ==========
     let currentPrice = 0;
     let priceSource = 'unknown';
 
-    // Prioridade: M1 (mais atual) > M5 > M15 > H1 > H4
-    if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
-      currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
-      priceSource = 'M1';
-      console.log(`💰 Preço usando M1: ${currentPrice}`);
-    } else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) {
-      currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual;
-      priceSource = 'M5';
-      console.log(`💰 Preço usando M5: ${currentPrice}`);
-    } else if (mtfManager.timeframes['M15']?.analysis?.preco_atual) {
-      currentPrice = mtfManager.timeframes['M15'].analysis.preco_atual;
-      priceSource = 'M15';
-      console.log(`💰 Preço usando M15: ${currentPrice}`);
-    } else if (mtfManager.timeframes['H1']?.analysis?.preco_atual) {
-      currentPrice = mtfManager.timeframes['H1'].analysis.preco_atual;
-      priceSource = 'H1';
-      console.log(`💰 Preço usando H1: ${currentPrice}`);
-    } else if (mtfManager.timeframes['H4']?.analysis?.preco_atual) {
-      currentPrice = mtfManager.timeframes['H4'].analysis.preco_atual;
-      priceSource = 'H4';
-      console.log(`💰 Preço usando H4: ${currentPrice}`);
-    } else {
-      // Fallback para o primeiro timeframe disponível
-      const firstTf = timeframesToAnalyze[0]?.key || 'M5';
-      currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
-      priceSource = firstTf;
-      console.log(`💰 Preço usando fallback (${firstTf}): ${currentPrice}`);
+    // 1. Tenta obter o tick atual (tempo real)
+    try {
+      const tickPrice = await getCurrentPrice(client, symbol);
+      if (tickPrice) {
+        currentPrice = tickPrice;
+        priceSource = 'tick';
+        console.log(`💰 Preço via tick: ${currentPrice}`);
+      }
+    } catch (error) {
+      console.log(`⚠️ Erro ao obter tick: ${error.message}`);
     }
 
-    // Gerar sugestão com o preço atual unificado
+    // 2. Se não conseguiu tick, usa o preço do M1 (mais atual entre os candles)
+    if (!currentPrice) {
+      if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
+        currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
+        priceSource = 'M1';
+        console.log(`💰 Preço via M1: ${currentPrice}`);
+      } else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) {
+        currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual;
+        priceSource = 'M5';
+        console.log(`💰 Preço via M5: ${currentPrice}`);
+      } else if (mtfManager.timeframes['M15']?.analysis?.preco_atual) {
+        currentPrice = mtfManager.timeframes['M15'].analysis.preco_atual;
+        priceSource = 'M15';
+        console.log(`💰 Preço via M15: ${currentPrice}`);
+      } else if (mtfManager.timeframes['H1']?.analysis?.preco_atual) {
+        currentPrice = mtfManager.timeframes['H1'].analysis.preco_atual;
+        priceSource = 'H1';
+        console.log(`💰 Preço via H1: ${currentPrice}`);
+      } else if (mtfManager.timeframes['H4']?.analysis?.preco_atual) {
+        currentPrice = mtfManager.timeframes['H4'].analysis.preco_atual;
+        priceSource = 'H4';
+        console.log(`💰 Preço via H4: ${currentPrice}`);
+      } else {
+        const firstTf = timeframesToAnalyze[0]?.key || 'M5';
+        currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
+        priceSource = firstTf;
+        console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
+      }
+    }
+
+    // Gerar sugestão com o preço atual
     const suggestion = BotExecutionCore.generateEntrySuggestion(
       { sinal: consolidated.simpleMajority.signal, probabilidade: agreement.agreement / 100 },
       currentPrice
     );
 
-    // Calcular timings de entrada baseados nos timeframes disponíveis no modo
     let m1Timing = null, m5Timing = null, m15Timing = null;
     const primarySignal = consolidated.simpleMajority.signal;
 
@@ -782,7 +809,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       m15Timing = calcularTimingM15(m15Analysis, primarySignal);
     }
 
-    // Montar resposta apenas com os timeframes do modo selecionado
     const responseTimeframes = {};
     TRADING_MODES[mode].timeframes.forEach(tfKey => {
       const tfData = mtfManager.timeframes[tfKey];
@@ -810,7 +836,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
         sinal_premium: consolidated.sinal_premium || null,
-        price: currentPrice,  // ← PREÇO UNIFICADO PARA TODOS!
+        price: currentPrice,
+        priceSource: priceSource, // Para debug
         ...(m1Timing && { m1_timing: m1Timing }),
         ...(m5Timing && { m5_timing: m5Timing }),
         ...(m15Timing && { m15_timing: m15Timing })
@@ -832,8 +859,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       timeframes: responseTimeframes,
       metadata: {
         responseTimeMs: responseTime,
-        timestamp: new Date().toISOString(),
-        priceSource: priceSource // opcional - para debug
+        timestamp: new Date().toISOString()
       }
     };
 
