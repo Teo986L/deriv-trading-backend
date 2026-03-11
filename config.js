@@ -40,8 +40,8 @@ module.exports = {
     // 🔥 Thresholds ajustados para melhor performance
     PROB_BUY_THRESHOLD: 0.55,
     PROB_SELL_THRESHOLD: 0.45,
-    MIN_CALL_CONFIRMATIONS: 3,      // Reduzido de 4
-    MIN_PUT_CONFIRMATIONS: 3,       // Mantido
+    MIN_CALL_CONFIRMATIONS: 3,
+    MIN_PUT_CONFIRMATIONS: 3,
 
     TIMEFRAMES: {
         M1: 60,
@@ -54,7 +54,7 @@ module.exports = {
     },
 
     BOT_SHIELD_CONFIG: {
-        MIN_CONFIDENCE: 65,          // Reduzido de 75
+        MIN_CONFIDENCE: 65,
         USE_CLOSED_CANDLES_ONLY: true,
         ELLIOTT_WEIGHT_REDUCTION: 0.3,
         MAX_ALLOWED_DELAY_MS: 30000,
@@ -131,7 +131,6 @@ module.exports = {
                     alvo_moderado_pct: 1.8
                 },
                 
-                // 🔥 Volatility Index otimizado
                 volatility_index: { 
                     nome: 'Volatility Index',
                     rsi_oversold: 20,
@@ -189,5 +188,15 @@ module.exports = {
             else if (simbolo.includes('frx')) return 'forex';
             else return 'indice_normal';
         }
-    }
+    },
+
+    // 🔥 NOVAS CONFIGURAÇÕES PARA ESTABILIDADE
+    SMOOTHING: {
+        H1: { historySize: 3, minAgreement: 2 },
+        H4: { historySize: 3, minAgreement: 2 },
+        DEFAULT: { historySize: 1, minAgreement: 1 }
+    },
+
+    // 🔥 Tolerância para considerar candle fechado (em segundos)
+    CANDLE_CLOSE_TOLERANCE: 5
 };
