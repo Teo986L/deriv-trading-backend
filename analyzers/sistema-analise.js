@@ -61,6 +61,70 @@ class SistemaAnaliseInteligente {
         return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
     }
 
+    // ========== NOVA FUNÇÃO: DETECTAR DIVERGÊNCIAS MACD ==========
+    detectarDivergenciaMACD(macdData) {
+        if (!macdData || !macdData.valido) return { divergencia: false, motivo: '' };
+        
+        const { macd, sinal, histograma } = macdData;
+        
+        // Caso 1: MACD positivo e sinal positivo, mas histograma negativo
+        if (macd > 0 && sinal > 0 && histograma < 0) {
+            return {
+                divergencia: true,
+                tipo: 'DIVERGÊNCIA BEARISH',
+                motivo: 'MACD e sinal positivos mas histograma negativo - MOMENTO CONTRÁRIO À TENDÊNCIA',
+                acao: 'HOLD',
+                probabilidadeReducao: 0.5
+            };
+        }
+        
+        // Caso 2: MACD negativo e sinal negativo, mas histograma positivo
+        if (macd < 0 && sinal < 0 && histograma > 0) {
+            return {
+                divergencia: true,
+                tipo: 'DIVERGÊNCIA BULLISH',
+                motivo: 'MACD e sinal negativos mas histograma positivo - MOMENTO CONTRÁRIO À TENDÊNCIA',
+                acao: 'HOLD',
+                probabilidadeReducao: 0.5
+            };
+        }
+        
+        // Caso 3: MACD positivo mas sinal negativo (cruzamento de alta recente)
+        if (macd > 0 && sinal < 0) {
+            return {
+                divergencia: true,
+                tipo: 'CRUZAMENTO DE ALTA RECENTE',
+                motivo: 'MACD acabou de cruzar para cima - AGUARDAR CONFIRMAÇÃO',
+                acao: 'HOLD',
+                probabilidadeReducao: 0.7
+            };
+        }
+        
+        // Caso 4: MACD negativo mas sinal positivo (cruzamento de baixa recente)
+        if (macd < 0 && sinal > 0) {
+            return {
+                divergencia: true,
+                tipo: 'CRUZAMENTO DE BAIXA RECENTE',
+                motivo: 'MACD acabou de cruzar para baixo - AGUARDAR CONFIRMAÇÃO',
+                acao: 'HOLD',
+                probabilidadeReducao: 0.7
+            };
+        }
+        
+        // Caso 5: MACD próximo de zero (neutro)
+        if (Math.abs(macd) < 0.001 && Math.abs(histograma) < 0.001) {
+            return {
+                divergencia: true,
+                tipo: 'MACD NEUTRO',
+                motivo: 'MACD próximo de zero - TENDÊNCIA INDEFINIDA',
+                acao: 'HOLD',
+                probabilidadeReducao: 0.6
+            };
+        }
+        
+        return { divergencia: false, motivo: '' };
+    }
+
     calcularMediaSimples(precos, periodo) {
         if (!precos || precos.length === 0) return 0;
         if (precos.length < periodo) return precos.reduce((a, b) => a + b, 0) / precos.length;
@@ -189,6 +253,9 @@ class SistemaAnaliseInteligente {
         const volatilidadeAtual = this.calcularVolatilidade(candles, precoAtual);
         const tendenciaMACD = this.verificarTendenciaMACD(macdResult);
 
+        // ========== DETECTAR DIVERGÊNCIAS MACD ==========
+        const divergenciaMACD = this.detectarDivergenciaMACD(macdResult);
+
         const analiseDupla = this.sistemaDuplaTendencia.analisarTendenciasDuplas(
             candles, macdResult, rsi, adxData
         );
@@ -237,7 +304,8 @@ class SistemaAnaliseInteligente {
                 sinal: sinalDupla.sinal,
                 probabilidade: sinalDupla.probabilidade,
                 convergencia: analiseDupla.convergencia
-            }
+            },
+            divergencia_macd: divergenciaMACD // NOVO: adicionar à análise
         };
         
         this.multiTimeframeManager.addAnalysis(timeframeKey, analiseAtual);
@@ -251,6 +319,19 @@ class SistemaAnaliseInteligente {
         let probabilidade = consolidated.confidence;
         let regra = `Sinal consolidado por ADX (timeframe dominante: ${consolidated.timeframeDominante?.tf || 'N/A'})`;
         let explicacoes = [regra];
+
+        // ========== APLICAR FILTRO DE DIVERGÊNCIA MACD ==========
+        if (divergenciaMACD.divergencia) {
+            if (sinal !== 'HOLD') {
+                probabilidade *= divergenciaMACD.probabilidadeReducao;
+                explicacoes.push(`🚨 ${divergenciaMACD.tipo}: ${divergenciaMACD.motivo}`);
+                
+                if (divergenciaMACD.probabilidadeReducao <= 0.5) {
+                    sinal = 'HOLD';
+                    explicacoes.push('⚠️ FORÇADO HOLD por divergência MACD');
+                }
+            }
+        }
 
         if (advancedAnalysis && advancedAnalysis.summary) {
             const adv = advancedAnalysis.summary;
@@ -373,6 +454,7 @@ class SistemaAnaliseInteligente {
             },
             advanced_analysis: advancedAnalysis,
             velocidade_analysis: velocidadeAnalysis,
+            divergencia_macd: divergenciaMACD, // NOVO: incluir no resultado
             
             multi_timeframe: this.multiTimeframeManager.getDiagnostico ? 
                 this.multiTimeframeManager.getDiagnostico() : {
