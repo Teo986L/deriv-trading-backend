@@ -326,66 +326,100 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
   res.json(derivClient.getConnectionStatus());
 });
 
-// ========== FUNÇÃO PARA CALCULAR TIMING DE ENTRADA M1 ==========
+// ========== FUNÇÕES PARA CALCULAR TIMING DE ENTRADA COM ADX ==========
 function calcularTimingM1(m1Analysis, primarySignal) {
   if (!m1Analysis || primarySignal === 'HOLD') {
     return {
       permitido: false,
       motivo: 'M1 não disponível',
       rsi: m1Analysis?.rsi || null,
-      sinal: m1Analysis?.sinal || null
+      sinal: m1Analysis?.sinal || null,
+      adx: m1Analysis?.adx || null
     };
   }
 
+  const adx = m1Analysis.adx || 0;
+  const temTendenciaForte = adx >= 25;
+
   if (primarySignal === 'CALL') {
-    if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65) {
+    // Caso 1: Confirmação direta com tendência forte
+    if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65 && temTendenciaForte) {
       return {
         permitido: true,
-        motivo: 'M1 confirmando CALL',
+        motivo: `M1 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
         rsi: m1Analysis.rsi,
-        sinal: m1Analysis.sinal
+        sinal: m1Analysis.sinal,
+        adx: adx
       };
     }
+    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
+    else if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 3: Possível reversão de oversold
     else if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi < 30) {
       return {
         permitido: true,
-        motivo: 'M1 oversold - possível reversão',
+        motivo: `M1 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
         rsi: m1Analysis.rsi,
-        sinal: m1Analysis.sinal
+        sinal: m1Analysis.sinal,
+        adx: adx
       };
     }
     else {
       return {
         permitido: false,
-        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${m1Analysis.rsi?.toFixed(0)})`,
+        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${m1Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
         rsi: m1Analysis.rsi,
-        sinal: m1Analysis.sinal
+        sinal: m1Analysis.sinal,
+        adx: adx
       };
     }
   }
   else if (primarySignal === 'PUT') {
-    if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35) {
+    // Caso 1: Confirmação direta com tendência forte
+    if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35 && temTendenciaForte) {
       return {
         permitido: true,
-        motivo: 'M1 confirmando PUT',
+        motivo: `M1 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
         rsi: m1Analysis.rsi,
-        sinal: m1Analysis.sinal
+        sinal: m1Analysis.sinal,
+        adx: adx
       };
     }
+    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
+    else if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 3: Possível reversão de overbought
     else if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi > 70) {
       return {
         permitido: true,
-        motivo: 'M1 overbought - possível reversão',
+        motivo: `M1 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
         rsi: m1Analysis.rsi,
-        sinal: m1Analysis.sinal
+        sinal: m1Analysis.sinal,
+        adx: adx
       };
     }
     else {
       return {
         permitido: false,
-        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${m1Analysis.rsi?.toFixed(0)})`,
+        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${m1Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
         rsi: m1Analysis.rsi,
-        sinal: m1Analysis.sinal
+        sinal: m1Analysis.sinal,
+        adx: adx
       };
     }
   }
@@ -394,7 +428,220 @@ function calcularTimingM1(m1Analysis, primarySignal) {
     permitido: false,
     motivo: 'Sinal principal neutro',
     rsi: m1Analysis.rsi,
-    sinal: m1Analysis.sinal
+    sinal: m1Analysis.sinal,
+    adx: adx
+  };
+}
+
+function calcularTimingM5(m5Analysis, primarySignal) {
+  if (!m5Analysis || primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'M5 não disponível',
+      rsi: m5Analysis?.rsi || null,
+      sinal: m5Analysis?.sinal || null,
+      adx: m5Analysis?.adx || null
+    };
+  }
+
+  const adx = m5Analysis.adx || 0;
+  const temTendenciaForte = adx >= 25;
+
+  if (primarySignal === 'CALL') {
+    // Caso 1: Confirmação direta com tendência forte
+    if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi < 65 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
+    else if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi < 65) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 3: Possível reversão de oversold
+    else if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi < 30) {
+      return {
+        permitido: true,
+        motivo: `M5 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M5 não confirma (${m5Analysis.sinal}, RSI ${m5Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+  else if (primarySignal === 'PUT') {
+    // Caso 1: Confirmação direta com tendência forte
+    if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi > 35 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
+    else if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi > 35) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 3: Possível reversão de overbought
+    else if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi > 70) {
+      return {
+        permitido: true,
+        motivo: `M5 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M5 não confirma (${m5Analysis.sinal}, RSI ${m5Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi: m5Analysis.rsi,
+    sinal: m5Analysis.sinal,
+    adx: adx
+  };
+}
+
+function calcularTimingM15(m15Analysis, primarySignal) {
+  if (!m15Analysis || primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'M15 não disponível',
+      rsi: m15Analysis?.rsi || null,
+      sinal: m15Analysis?.sinal || null,
+      adx: m15Analysis?.adx || null
+    };
+  }
+
+  const adx = m15Analysis.adx || 0;
+  const temTendenciaForte = adx >= 25;
+
+  if (primarySignal === 'CALL') {
+    // Caso 1: Confirmação direta com tendência forte
+    if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi < 65 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
+    else if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi < 65) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 3: Possível reversão de oversold
+    else if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi < 30) {
+      return {
+        permitido: true,
+        motivo: `M15 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${m15Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+  else if (primarySignal === 'PUT') {
+    // Caso 1: Confirmação direta com tendência forte
+    if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi > 35 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 2: Confirmação sem tendência forte (entrada mais arriscada)
+    else if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi > 35) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    // Caso 3: Possível reversão de overbought
+    else if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi > 70) {
+      return {
+        permitido: true,
+        motivo: `M15 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${m15Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi: m15Analysis.rsi,
+    sinal: m15Analysis.sinal,
+    adx: adx
   };
 }
 
@@ -481,12 +728,21 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       basePrice
     );
 
-    // Calcular timing de entrada M1
-    let m1Timing = null;
+    // Calcular timings de entrada baseados nos timeframes disponíveis no modo
+    let m1Timing = null, m5Timing = null, m15Timing = null;
+    const primarySignal = consolidated.simpleMajority.signal;
+
     if (TRADING_MODES[mode].timeframes.includes('M1')) {
       const m1Analysis = mtfManager.timeframes['M1']?.analysis;
-      const primarySignal = consolidated.simpleMajority.signal;
       m1Timing = calcularTimingM1(m1Analysis, primarySignal);
+    }
+    if (TRADING_MODES[mode].timeframes.includes('M5')) {
+      const m5Analysis = mtfManager.timeframes['M5']?.analysis;
+      m5Timing = calcularTimingM5(m5Analysis, primarySignal);
+    }
+    if (TRADING_MODES[mode].timeframes.includes('M15')) {
+      const m15Analysis = mtfManager.timeframes['M15']?.analysis;
+      m15Timing = calcularTimingM15(m15Analysis, primarySignal);
     }
 
     // Montar resposta apenas com os timeframes do modo selecionado
@@ -517,7 +773,9 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
         sinal_premium: consolidated.sinal_premium || null,
-        m1_timing: m1Timing
+        ...(m1Timing && { m1_timing: m1Timing }),
+        ...(m5Timing && { m5_timing: m5Timing }),
+        ...(m15Timing && { m15_timing: m15Timing })
       },
       agreement: {
         agreement: agreement.agreement,
