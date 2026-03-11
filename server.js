@@ -81,7 +81,7 @@ const TRADING_MODES = {
     description: 'Ondas médias de 15-60 minutos'
   },
   'PESCADOR': {
-    timeframes: ['M15', 'H1', 'H4'],
+    timeframes: ['M15', 'H1', 'H4', 'H24'],
     description: 'Grandes movimentos de horas a dias'
   }
 };
