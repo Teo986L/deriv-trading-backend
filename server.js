@@ -647,6 +647,16 @@ function calcularTimingM15(m15Analysis, primarySignal) {
   };
 }
 
+// ========== FUNÇÃO AUXILIAR PARA IDENTIFICAR FONTE DO PREÇO ==========
+function getPriceSource(mtfManager) {
+  if (mtfManager.timeframes['M1']?.analysis?.preco_atual) return 'M1';
+  if (mtfManager.timeframes['M5']?.analysis?.preco_atual) return 'M5';
+  if (mtfManager.timeframes['M15']?.analysis?.preco_atual) return 'M15';
+  if (mtfManager.timeframes['H1']?.analysis?.preco_atual) return 'H1';
+  if (mtfManager.timeframes['H4']?.analysis?.preco_atual) return 'H4';
+  return 'unknown';
+}
+
 // ========== ROTA PRINCIPAL DE ANÁLISE ==========
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
@@ -716,14 +726,46 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
-    const firstTf = timeframesToAnalyze[0]?.key || 'M5';
-    const basePrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
-    
+    // ========== PREÇO EM TEMPO REAL (UNIFICADO) ==========
+    let currentPrice = 0;
+    let priceSource = 'unknown';
+
+    // Prioridade: M1 (mais atual) > M5 > M15 > H1 > H4
+    if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
+      currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
+      priceSource = 'M1';
+      console.log(`💰 Preço usando M1: ${currentPrice}`);
+    } else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) {
+      currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual;
+      priceSource = 'M5';
+      console.log(`💰 Preço usando M5: ${currentPrice}`);
+    } else if (mtfManager.timeframes['M15']?.analysis?.preco_atual) {
+      currentPrice = mtfManager.timeframes['M15'].analysis.preco_atual;
+      priceSource = 'M15';
+      console.log(`💰 Preço usando M15: ${currentPrice}`);
+    } else if (mtfManager.timeframes['H1']?.analysis?.preco_atual) {
+      currentPrice = mtfManager.timeframes['H1'].analysis.preco_atual;
+      priceSource = 'H1';
+      console.log(`💰 Preço usando H1: ${currentPrice}`);
+    } else if (mtfManager.timeframes['H4']?.analysis?.preco_atual) {
+      currentPrice = mtfManager.timeframes['H4'].analysis.preco_atual;
+      priceSource = 'H4';
+      console.log(`💰 Preço usando H4: ${currentPrice}`);
+    } else {
+      // Fallback para o primeiro timeframe disponível
+      const firstTf = timeframesToAnalyze[0]?.key || 'M5';
+      currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
+      priceSource = firstTf;
+      console.log(`💰 Preço usando fallback (${firstTf}): ${currentPrice}`);
+    }
+
+    // Gerar sugestão com o preço atual unificado
     const suggestion = BotExecutionCore.generateEntrySuggestion(
       { sinal: consolidated.simpleMajority.signal, probabilidade: agreement.agreement / 100 },
-      basePrice
+      currentPrice
     );
 
+    // Calcular timings de entrada baseados nos timeframes disponíveis no modo
     let m1Timing = null, m5Timing = null, m15Timing = null;
     const primarySignal = consolidated.simpleMajority.signal;
 
@@ -740,6 +782,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       m15Timing = calcularTimingM15(m15Analysis, primarySignal);
     }
 
+    // Montar resposta apenas com os timeframes do modo selecionado
     const responseTimeframes = {};
     TRADING_MODES[mode].timeframes.forEach(tfKey => {
       const tfData = mtfManager.timeframes[tfKey];
@@ -767,6 +810,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
         sinal_premium: consolidated.sinal_premium || null,
+        price: currentPrice,  // ← PREÇO UNIFICADO PARA TODOS!
         ...(m1Timing && { m1_timing: m1Timing }),
         ...(m5Timing && { m5_timing: m5Timing }),
         ...(m15Timing && { m15_timing: m15Timing })
@@ -788,11 +832,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       timeframes: responseTimeframes,
       metadata: {
         responseTimeMs: responseTime,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        priceSource: priceSource // opcional - para debug
       }
     };
 
-    console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados`);
+    console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Preço fonte: ${priceSource}`);
     res.json(response);
 
   } catch (error) {
