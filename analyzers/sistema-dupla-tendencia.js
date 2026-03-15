@@ -280,11 +280,33 @@ class SistemaDuplaTendencia {
         
         const { convergencia } = analiseDupla;
         
+        // 🔥 CORREÇÃO: Nunca retornar HOLD se houver uma direção clara
+        let sinal = convergencia.sinalFinal;
+        let probabilidade = convergencia.probabilidade;
+        
+        // Se o sinal for HOLD mas há ADX forte, usar a tendência predominante
+        if (sinal === 'HOLD' && analiseDupla.adx > 25) {
+            // Usar a tendência com maior confiabilidade
+            if (analiseDupla.tendenciaCurtoPrazo.confiabilidade > analiseDupla.tendenciaMedioPrazo.confiabilidade) {
+                sinal = analiseDupla.tendenciaCurtoPrazo.sinal;
+                probabilidade = 0.55;
+            } else {
+                sinal = analiseDupla.tendenciaMedioPrazo.sinal;
+                probabilidade = 0.55;
+            }
+            
+            // Se ainda assim for HOLD, usar o RSI
+            if (sinal === 'HOLD') {
+                sinal = analiseDupla.rsi > 50 ? 'CALL' : 'PUT';
+                probabilidade = 0.5;
+            }
+        }
+        
         return {
-            sinal: convergencia.sinalFinal,
-            probabilidade: convergencia.probabilidade,
+            sinal: sinal,
+            probabilidade: probabilidade,
             motivo: `${convergencia.tipo} - ${convergencia.explicacao}`,
-            acao: convergencia.sinalFinal === 'HOLD' ? 'AGUARDAR' : `${convergencia.sinalFinal} COM ${convergencia.risco} RISCO`
+            acao: sinal === 'HOLD' ? 'AGUARDAR' : `${sinal} COM ${convergencia.risco} RISCO`
         };
     }
 }
