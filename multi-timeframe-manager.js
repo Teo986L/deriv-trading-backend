@@ -254,18 +254,26 @@ class MultiTimeframeManager {
             return this.consolidateSignalsFallback();
         }
 
-        // ========== NOVA LÓGICA: EMPATE = HOLD ==========
+        // ========== CORREÇÃO: LÓGICA DE EMPATE ==========
         let primarySignal = 'HOLD';
         
         if (callCount === 0 && putCount === 0) {
             primarySignal = 'HOLD';
         }
-        else if (callCount === putCount && callCount > 0) {
-            primarySignal = 'HOLD';
-            console.log(`⚖️ Empate detectado: ${callCount} CALL vs ${putCount} PUT → FORÇANDO HOLD`);
-        }
         else {
+            // 🔥 CORREÇÃO: Usar peso, não contagem, para decidir
             primarySignal = callWeight > putWeight ? 'CALL' : 'PUT';
+            
+            // Se ainda assim houver empate, usar o timeframe dominante
+            if (callWeight === putWeight) {
+                const dominante = this.getTimeframeDominante();
+                if (dominante && dominante.sinal !== 'HOLD') {
+                    primarySignal = dominante.sinal;
+                    console.log(`⚖️ Empate por peso → usando timeframe dominante: ${dominante.tf} (${dominante.sinal})`);
+                }
+            }
+            
+            console.log(`⚖️ Decisão: ${callCount}CALL/${putCount}PUT | Pesos: ${callWeight.toFixed(2)}/${putWeight.toFixed(2)} → ${primarySignal}`);
         }
 
         let agreement = 0;
@@ -305,7 +313,7 @@ class MultiTimeframeManager {
             details,
             timeframesAnalyzed: timeframesCount,
             simpleMajority: {
-                signal: primarySignal,
+                signal: callCount > putCount ? 'CALL' : (putCount > callCount ? 'PUT' : 'HOLD'),
                 callCount,
                 putCount,
                 holdCount
