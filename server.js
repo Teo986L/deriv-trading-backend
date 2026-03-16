@@ -1,819 +1,931 @@
-// multi-timeframe-manager.js
-const { SMOOTHING } = require('./config');
+const express = require('express');
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const { createClient } = require('redis');
+const DerivClient = require('./deriv-client');
+const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
+const MultiTimeframeManager = require('./multi-timeframe-manager');
+const BotExecutionCore = require('./bot-execution-core');
+const { API_TOKEN, CANDLE_CLOSE_TOLERANCE, SMOOTHING } = require('./config');
 
-class MultiTimeframeManager {
-    constructor(simbolo = '') {
-        this.timeframes = {
-            M1: { seconds: 60, label: '1m', data: null, analysis: null },
-            M5: { seconds: 300, label: '5m', data: null, analysis: null },
-            M15: { seconds: 900, label: '15m', data: null, analysis: null },
-            M30: { seconds: 1800, label: '30m', data: null, analysis: null },
-            H1: { seconds: 3600, label: '1h', data: null, analysis: null },
-            H4: { seconds: 14400, label: '4h', data: null, analysis: null },
-            H24: { seconds: 86400, label: '24h', data: null, analysis: null }
-        };
-        this.consolidatedSignal = { signal: 'HOLD', confidence: 0, agreement: 0, details: {} };
-        this.allAnalyses = {};
-        this.signalHistory = {};
-        
-        // ========== NOVAS PROPRIEDADES PARA ANÁLISE AVANÇADA ==========
-        this.simbolo = simbolo;
-        this.tipoAtivo = this.detectarTipoAtivo(simbolo);
-        this.priceHistory = {
-            'M1': [], 'M5': [], 'M15': [], 'M30': [], 'H1': [], 'H4': [], 'H24': []
-        };
-        this.historicoAcertos = {
-            'M1': { acertos: 0, total: 0 }, 'M5': { acertos: 0, total: 0 },
-            'M15': { acertos: 0, total: 0 }, 'M30': { acertos: 0, total: 0 },
-            'H1': { acertos: 0, total: 0 }, 'H4': { acertos: 0, total: 0 },
-            'H24': { acertos: 0, total: 0 }
-        };
-        this.ultimosRSI = {};
-        
-        // ========== CONFIGURAÇÕES ESPECÍFICAS POR ATIVO ==========
-        this.CONFIG_ATIVO = {
-            'CRASH': {
-                rsiCompra: 35, rsiVenda: 60, adxMinimo: 25,
-                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
-                nome: 'Crash Index',
-                estrategia: 'Quedas violentas, comprar nas correções RSI<35, vender nos topos RSI>60'
-            },
-            'BOOM': {
-                rsiCompra: 40, rsiVenda: 65, adxMinimo: 25,
-                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
-                nome: 'Boom Index',
-                estrategia: 'Altas violentas, vender nas correções RSI>65, comprar nos fundos RSI<40'
-            },
-            'JUMP': {
-                rsiCompra: 45, rsiVenda: 55, adxMinimo: 30,
-                pesoH4: 2.0, pesoH1: 1.5, pesoM15: 1.5, pesoM5: 1.0, pesoM1: 0.8,
-                nome: 'Jump Index',
-                estrategia: 'Movimentos bruscos, operar após confirmação do salto'
-            },
-            'STEP': {
-                rsiCompra: 40, rsiVenda: 60, adxMinimo: 20,
-                pesoH4: 1.5, pesoH1: 1.3, pesoM15: 1.2, pesoM5: 1.0, pesoM1: 1.0,
-                nome: 'Step Index',
-                estrategia: 'Movimentos em degraus, operar quebras de suporte/resistência'
-            },
-            'DEFAULT': {
-                rsiCompra: 30, rsiVenda: 70, adxMinimo: 20,
-                pesoH4: 3.5, pesoH1: 3.0, pesoM15: 2.0, pesoM5: 1.5, pesoM1: 1.0,
-                nome: 'Default',
-                estrategia: 'Seguir tendência com todos os timeframes'
+const app = express();
+
+// ========== CONFIGURAÇÕES DE SEGURANÇA ==========
+const SECRETS = {
+  '7': process.env.SECRET_KEY_7_DAYS,
+  '30': process.env.SECRET_KEY_30_DAYS,
+  '90': process.env.SECRET_KEY_90_DAYS,
+  '180': process.env.SECRET_KEY_180_DAYS,
+  '365': process.env.SECRET_KEY_365_DAYS
+};
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
+
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',')
+  : ['http://localhost:3000'];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Origem não permitida pelo CORS'));
+    }
+  },
+  optionsSuccessStatus: 200
+}));
+
+app.use(express.json());
+app.set('trust proxy', 1);
+
+// ========== CONFIGURAÇÃO DO REDIS (OPCIONAL) ==========
+let redisClient = null;
+
+const TTL_BY_TIMEFRAME = {
+  'M1': 10,
+  'M5': 20,
+  'M15': 30,
+  'M30': 45,
+  'H1': 60,
+  'H4': 120,
+  'H24': 300
+};
+
+if (process.env.REDIS_URL) {
+  try {
+    redisClient = createClient({ url: process.env.REDIS_URL });
+    redisClient.on('error', (err) => console.error('❌ Redis error:', err));
+    
+    (async () => {
+      await redisClient.connect();
+      console.log('✅ Conectado ao Redis');
+    })();
+  } catch (err) {
+    console.error('❌ Falha ao conectar Redis:', err);
+    redisClient = null;
+  }
+} else {
+  console.log('⚠️ Redis não configurado - cache desativado');
+}
+
+// ========== DEFINIÇÃO DOS MODOS DE TRADING ==========
+const TRADING_MODES = {
+  'SNIPER': {
+    timeframes: ['M1', 'M5', 'M15'],
+    description: 'Entradas cirúrgicas de 1-15 minutos'
+  },
+  'CAÇADOR': {
+    timeframes: ['M5', 'M15', 'H1'],
+    description: 'Ondas médias de 15-60 minutos'
+  },
+  'PESCADOR': {
+    timeframes: ['M15', 'H1', 'H4', 'H24'],
+    description: 'Grandes movimentos de horas a dias'
+  }
+};
+
+const ALL_TIMEFRAMES_CONFIG = {
+  'M1': { key: 'M1', seconds: 60, candleCount: 60, minRequired: 20 },
+  'M5': { key: 'M5', seconds: 300, candleCount: 72, minRequired: 30 },
+  'M15': { key: 'M15', seconds: 900, candleCount: 96, minRequired: 20 },
+  'M30': { key: 'M30', seconds: 1800, candleCount: 46, minRequired: 15 },
+  'H1': { key: 'H1', seconds: 3600, candleCount: 48, minRequired: 10 },
+  'H4': { key: 'H4', seconds: 14400, candleCount: 42, minRequired: 8 },
+  'H24': { key: 'H24', seconds: 86400, candleCount: 20, minRequired: 5 }
+};
+
+function isCandleClosed(candle, timeframeSeconds) {
+  if (!candle || !candle.epoch) return true;
+  const now = Math.floor(Date.now() / 1000);
+  const candleEnd = candle.epoch + timeframeSeconds;
+  return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
+}
+
+async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
+  if (!redisClient || !redisClient.isReady || forceFresh) {
+    console.log(`🔄 Buscando ${tf.key} direto da Deriv (sem cache)`);
+    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+    if (!Array.isArray(candles)) {
+      console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
+      return candles;
+    }
+    const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
+    if (closedCandles.length < tf.minRequired) {
+      console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
+    }
+    return closedCandles;
+  }
+
+  const cacheKey = `candles:${symbol}:${tf.key}`;
+  
+  try {
+    const cached = await redisClient.get(cacheKey);
+    
+    if (cached) {
+      const ttl = await redisClient.ttl(cacheKey);
+      console.log(`✅ Cache hit: ${cacheKey} (TTL: ${ttl}s)`);
+      
+      if (ttl < 5) {
+        setTimeout(async () => {
+          try {
+            const freshCandles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+            if (Array.isArray(freshCandles)) {
+              const closedCandles = freshCandles.filter(c => isCandleClosed(c, tf.seconds));
+              const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
+              await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
+              console.log(`🔄 Cache atualizado em background: ${cacheKey}`);
             }
-        };
-        
-        this.TF_BASE_WEIGHT = {
-            'M1': 1.0, 'M5': 1.5, 'M15': 2.0, 'M30': 2.5, 'H1': 3.0, 'H4': 3.5, 'H24': 4.0
-        };
-        
-        this.ADX_THRESHOLDS = {
-            'M1': { min: 12, ignore_below: 8 },
-            'M5': { min: 12, ignore_below: 8 },
-            'M15': { min: 14, ignore_below: 10 },
-            'M30': { min: 14, ignore_below: 10 },
-            'H1': { min: 12, ignore_below: 8 },
-            'H4': { min: 10, ignore_below: 6 },
-            'H24': { min: 8, ignore_below: 5 }
-        };
+          } catch (err) {
+            console.error(`❌ Erro atualizando cache em background: ${err.message}`);
+          }
+        }, 0);
+      }
+      
+      return JSON.parse(cached);
+    }
+    
+    console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
+    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+    
+    if (!Array.isArray(candles)) {
+      console.error(`❌ Resposta inválida da Deriv para ${cacheKey}: não é um array`);
+      return candles;
+    }
+    
+    const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
+    
+    if (closedCandles.length < tf.minRequired) {
+      console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
+    }
+    
+    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
+    await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
+    
+    return closedCandles;
+  } catch (error) {
+    console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
+    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+    if (!Array.isArray(candles)) return candles;
+    return candles.filter(c => isCandleClosed(c, tf.seconds));
+  }
+}
+
+const analyzeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Muitas requisições, tente novamente mais tarde.' }
+});
+
+const adminLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: 'Limite de geração de tokens excedido.' }
+});
+
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  let token = authHeader && authHeader.split(' ')[1];
+  
+  if (!token && req.body && req.body.token) {
+    token = req.body.token;
+  }
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
+
+  const secretsToTry = [
+    { period: 365, key: SECRETS['365'] },
+    { period: 180, key: SECRETS['180'] },
+    { period: 90, key: SECRETS['90'] },
+    { period: 30, key: SECRETS['30'] },
+    { period: 7, key: SECRETS['7'] }
+  ];
+
+  for (const { period, key } of secretsToTry) {
+    if (!key) continue;
+    try {
+      const decoded = jwt.verify(token, key);
+      req.user = decoded;
+      req.tokenPeriod = period;
+      return next();
+    } catch (err) {}
+  }
+
+  return res.status(403).json({ error: 'Token inválido ou expirado' });
+}
+
+let derivClient = null;
+let derivConnectionPromise = null;
+
+async function getDerivClient() {
+  if (derivConnectionPromise) {
+    return derivConnectionPromise;
+  }
+  
+  if (!derivClient) {
+    derivClient = new DerivClient(API_TOKEN);
+  }
+  
+  derivConnectionPromise = derivClient.connect()
+    .then(() => {
+      console.log('✅ Cliente Deriv pronto com conexão persistente');
+      return derivClient;
+    })
+    .catch(err => {
+      console.error('❌ Falha na conexão persistente:', err);
+      derivConnectionPromise = null;
+      throw err;
+    });
+  
+  return derivConnectionPromise;
+}
+
+// ========== FUNÇÃO: OBTER PREÇO ATUAL VIA TICK ==========
+async function getCurrentPrice(client, symbol) {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
+      resolve(null);
+    }, 2000);
+
+    const reqId = Date.now();
+    const handler = (response) => {
+      if (response.error) {
+        console.log(`⚠️ Erro no tick: ${response.error.message}`);
+        clearTimeout(timeout);
+        client.removeListener(reqId);
+        resolve(null);
+      } else if (response.tick && response.tick.symbol === symbol) {
+        clearTimeout(timeout);
+        client.removeListener(reqId);
+        resolve(response.tick.quote);
+      }
+    };
+    
+    client.addListener(reqId, handler);
+    client.send({ tick: symbol, req_id: reqId });
+  });
+}
+
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
+app.get('/api/trading-modes', (req, res) => {
+  res.json({
+    success: true,
+    modes: Object.keys(TRADING_MODES).map(key => ({
+      id: key,
+      name: key,
+      description: TRADING_MODES[key].description,
+      timeframes: TRADING_MODES[key].timeframes
+    }))
+  });
+});
+
+app.post('/api/validate-token', (req, res) => {
+  const { token } = req.body;
+  
+  if (!token) {
+    return res.status(400).json({ valid: false, message: 'Token não fornecido' });
+  }
+
+  const secretsToTry = [
+    { period: 365, key: SECRETS['365'] },
+    { period: 180, key: SECRETS['180'] },
+    { period: 90, key: SECRETS['90'] },
+    { period: 30, key: SECRETS['30'] },
+    { period: 7, key: SECRETS['7'] }
+  ];
+
+  for (const { period, key } of secretsToTry) {
+    if (!key) continue;
+    try {
+      const decoded = jwt.verify(token, key);
+      return res.json({
+        valid: true,
+        periodDays: period,
+        expiresAt: decoded.exp,
+        userId: decoded.userId || null
+      });
+    } catch (err) {}
+  }
+
+  return res.status(401).json({ valid: false, message: 'Token inválido ou expirado' });
+});
+
+app.post('/api/admin/generate-token', adminLimiter, (req, res) => {
+  const { adminKey, periodDays, userId } = req.body;
+
+  if (!adminKey || adminKey !== ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Chave de administrador inválida' });
+  }
+
+  const period = parseInt(periodDays);
+  if (![7, 30, 90, 180, 365].includes(period)) {
+    return res.status(400).json({ error: 'Período inválido. Use 7, 30, 90, 180 ou 365.' });
+  }
+
+  const secret = SECRETS[period.toString()];
+  if (!secret) {
+    return res.status(500).json({ error: 'Chave para o período não configurada no servidor' });
+  }
+
+  const { randomUUID } = require('crypto');
+  const finalUserId = userId || randomUUID();
+  const jti = randomUUID();
+
+  const payload = {
+    userId: finalUserId,
+    period,
+    jti
+  };
+
+  const expiresInSeconds = period * 24 * 60 * 60;
+  const token = jwt.sign(payload, secret, { expiresIn: expiresInSeconds });
+
+  res.json({
+    success: true,
+    token,
+    periodDays: period,
+    expiresIn: expiresInSeconds,
+    userId: finalUserId
+  });
+});
+
+app.get('/api/connection-status', authenticateToken, (req, res) => {
+  if (!derivClient) {
+    return res.json({ status: 'not_initialized' });
+  }
+  res.json(derivClient.getConnectionStatus());
+});
+
+function calcularTimingM1(m1Analysis, primarySignal) {
+  if (!m1Analysis || primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'M1 não disponível',
+      rsi: m1Analysis?.rsi || null,
+      sinal: m1Analysis?.sinal || null,
+      adx: m1Analysis?.adx || null
+    };
+  }
+
+  const adx = m1Analysis.adx || 0;
+  const temTendenciaForte = adx >= 25;
+
+  if (primarySignal === 'CALL') {
+    if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi < 65) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi < 30) {
+      return {
+        permitido: true,
+        motivo: `M1 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${m1Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+  else if (primarySignal === 'PUT') {
+    if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m1Analysis.sinal === 'PUT' && m1Analysis.rsi > 35) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m1Analysis.sinal === 'CALL' && m1Analysis.rsi > 70) {
+      return {
+        permitido: true,
+        motivo: `M1 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${m1Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m1Analysis.rsi,
+        sinal: m1Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi: m1Analysis.rsi,
+    sinal: m1Analysis.sinal,
+    adx: adx
+  };
+}
+
+function calcularTimingM5(m5Analysis, primarySignal) {
+  if (!m5Analysis || primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'M5 não disponível',
+      rsi: m5Analysis?.rsi || null,
+      sinal: m5Analysis?.sinal || null,
+      adx: m5Analysis?.adx || null
+    };
+  }
+
+  const adx = m5Analysis.adx || 0;
+  const temTendenciaForte = adx >= 25;
+
+  if (primarySignal === 'CALL') {
+    if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi < 65 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi < 65) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi < 30) {
+      return {
+        permitido: true,
+        motivo: `M5 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M5 não confirma (${m5Analysis.sinal}, RSI ${m5Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+  else if (primarySignal === 'PUT') {
+    if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi > 35 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m5Analysis.sinal === 'PUT' && m5Analysis.rsi > 35) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m5Analysis.sinal === 'CALL' && m5Analysis.rsi > 70) {
+      return {
+        permitido: true,
+        motivo: `M5 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M5 não confirma (${m5Analysis.sinal}, RSI ${m5Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m5Analysis.rsi,
+        sinal: m5Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi: m5Analysis.rsi,
+    sinal: m5Analysis.sinal,
+    adx: adx
+  };
+}
+
+function calcularTimingM15(m15Analysis, primarySignal) {
+  if (!m15Analysis || primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'M15 não disponível',
+      rsi: m15Analysis?.rsi || null,
+      sinal: m15Analysis?.sinal || null,
+      adx: m15Analysis?.adx || null
+    };
+  }
+
+  const adx = m15Analysis.adx || 0;
+  const temTendenciaForte = adx >= 25;
+
+  if (primarySignal === 'CALL') {
+    if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi < 65 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi < 65) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi < 30) {
+      return {
+        permitido: true,
+        motivo: `M15 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${m15Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+  else if (primarySignal === 'PUT') {
+    if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi > 35 && temTendenciaForte) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi > 35) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    else if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi > 70) {
+      return {
+        permitido: true,
+        motivo: `M15 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${m15Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi: m15Analysis.rsi,
+        sinal: m15Analysis.sinal,
+        adx: adx
+      };
+    }
+  }
+
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi: m15Analysis.rsi,
+    sinal: m15Analysis.sinal,
+    adx: adx
+  };
+}
+
+function getPriceSource(mtfManager) {
+  if (mtfManager.timeframes['M1']?.analysis?.preco_atual) return 'M1';
+  if (mtfManager.timeframes['M5']?.analysis?.preco_atual) return 'M5';
+  if (mtfManager.timeframes['M15']?.analysis?.preco_atual) return 'M15';
+  if (mtfManager.timeframes['H1']?.analysis?.preco_atual) return 'H1';
+  if (mtfManager.timeframes['H4']?.analysis?.preco_atual) return 'H4';
+  return 'unknown';
+}
+
+app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
+  const startTime = Date.now();
+  
+  try {
+    const { symbol, mode } = req.body;
+    
+    if (!symbol) {
+      return res.status(400).json({ error: 'Símbolo é obrigatório' });
     }
 
-    // ========== DETECTAR TIPO DE ATIVO ==========
-    detectarTipoAtivo(simbolo) {
-        if (!simbolo) return 'DEFAULT';
-        if (simbolo.includes('CRASH')) return 'CRASH';
-        if (simbolo.includes('BOOM')) return 'BOOM';
-        if (simbolo.includes('JUMP')) return 'JUMP';
-        if (simbolo.includes('STEP')) return 'STEP';
-        return 'DEFAULT';
+    if (!mode || !TRADING_MODES[mode]) {
+      return res.status(400).json({ 
+        error: 'Modo de trading inválido. Use: SNIPER, CAÇADOR ou PESCADOR',
+        availableModes: Object.keys(TRADING_MODES)
+      });
     }
 
-    // ========== OBTER CONFIGURAÇÃO DO ATIVO ==========
-    getConfigAtivo() {
-        return this.CONFIG_ATIVO[this.tipoAtivo] || this.CONFIG_ATIVO['DEFAULT'];
+    console.log(`\n🎯 Modo selecionado: ${mode} - ${TRADING_MODES[mode].description}`);
+    console.log(`📊 Timeframes a analisar: ${TRADING_MODES[mode].timeframes.join(', ')}`);
+
+    const client = await getDerivClient();
+
+    const timeframesToAnalyze = TRADING_MODES[mode].timeframes
+      .map(tfKey => ALL_TIMEFRAMES_CONFIG[tfKey]);
+
+    // ========== PASSA O SÍMBOLO PARA O MTF MANAGER ==========
+    const mtfManager = new MultiTimeframeManager(symbol);
+    
+    const tipoAtivo = symbol.startsWith('R_') ? 'volatility_index' : 
+                     (symbol.includes('frx') ? 'forex' : 'indice_normal');
+    
+    const sistemaBase = new SistemaAnaliseInteligente(symbol);
+    
+    if (sistemaBase.sistemaPesos && sistemaBase.sistemaPesos.setTipoAtivo) {
+      sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
     }
 
-    // ========== DETECTAR ALINHAMENTO PARA ENTRADA NO PESCADOR ==========
-    detectarAlinhamentoPescador() {
-        const pescador = this.consolidatedSignal;
-        const sniperM1 = this.allAnalyses['M1'];
+    for (const tf of timeframesToAnalyze) {
+      try {
+        console.log(`🔍 Analisando ${tf.key}...`);
         
-        if (!pescador || !sniperM1) return null;
+        const forceFresh = (tf.key === 'M1' || tf.key === 'M5') && (Math.random() > 0.5);
         
-        const config = this.getConfigAtivo();
+        const candles = await getCandlesWithCache(client, symbol, tf, forceFresh);
         
-        // Se PESCADOR quer PUT mas SNIPER ainda está CALL
-        if (pescador.signal === 'PUT' && sniperM1.sinal === 'CALL') {
-            
-            // Detectar se SNIPER está perto de virar (RSI alto)
-            if (sniperM1.rsi > config.rsiVenda - 5 && sniperM1.adx > config.adxMinimo) {
-                return {
-                    status: 'AGUARDAR',
-                    direcaoPescador: 'PUT',
-                    direcaoSniper: 'CALL',
-                    motivo: `SNIPER ainda CALL mas RSI ${sniperM1.rsi} próximo de ${config.rsiVenda} - quase virando`,
-                    tempo_estimado: '5-10 minutos',
-                    entrada_quando: 'M1 virar PUT'
-                };
-            }
-            
-            if (sniperM1.rsi > config.rsiVenda) {
-                return {
-                    status: 'ATENÇÃO',
-                    direcaoPescador: 'PUT',
-                    direcaoSniper: 'CALL',
-                    motivo: `SNIPER sobrecomprado (RSI ${sniperM1.rsi}) - pode virar a qualquer momento`,
-                    tempo_estimado: '1-5 minutos',
-                    entrada_quando: 'M1 virar PUT'
-                };
-            }
+        if (!Array.isArray(candles)) {
+          console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
+          continue;
         }
         
-        // Se PESCADOR quer CALL mas SNIPER ainda está PUT
-        if (pescador.signal === 'CALL' && sniperM1.sinal === 'PUT') {
-            
-            if (sniperM1.rsi < config.rsiCompra + 5 && sniperM1.adx > config.adxMinimo) {
-                return {
-                    status: 'AGUARDAR',
-                    direcaoPescador: 'CALL',
-                    direcaoSniper: 'PUT',
-                    motivo: `SNIPER ainda PUT mas RSI ${sniperM1.rsi} próximo de ${config.rsiCompra} - quase virando`,
-                    tempo_estimado: '5-10 minutos',
-                    entrada_quando: 'M1 virar CALL'
-                };
-            }
-            
-            if (sniperM1.rsi < config.rsiCompra) {
-                return {
-                    status: 'ATENÇÃO',
-                    direcaoPescador: 'CALL',
-                    direcaoSniper: 'PUT',
-                    motivo: `SNIPER sobrevendido (RSI ${sniperM1.rsi}) - pode virar a qualquer momento`,
-                    tempo_estimado: '1-5 minutos',
-                    entrada_quando: 'M1 virar CALL'
-                };
-            }
+        if (candles.length < tf.minRequired) {
+          console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
+          continue;
         }
+
+        const analysis = await sistemaBase.analisar(candles, tf.key);
         
-        return null;
+        if (analysis && !analysis.erro) {
+          mtfManager.addAnalysis(tf.key, analysis);
+          console.log(`✅ ${tf.key} analisado com sucesso`);
+        }
+      } catch (err) {
+        console.error(`❌ Erro ao buscar/analisar ${tf.key}:`, err.message);
+      }
     }
 
-    // ========== DETECTAR CICLO COMPLETO ==========
-    detectarCicloCompleto() {
-        const h4 = this.allAnalyses['H4'];
-        const m1 = this.allAnalyses['M1'];
-        const config = this.getConfigAtivo();
-        
-        if (!h4 || !m1) return null;
-        
-        // ===== PARA CRASH (tendência de QUEDA) =====
-        if (this.tipoAtivo === 'CRASH') {
-            
-            // FASE 1: FUNDO (comprar para correção)
-            if (m1.rsi < config.rsiCompra && m1.adx > config.adxMinimo && m1.sinal === 'PUT') {
-                return {
-                    fase: 'FUNDO_DO_CICLO',
-                    acao: 'COMPRAR_CORRECAO',
-                    direcao: 'CALL',
-                    duracao: '10-15 minutos',
-                    confianca: 0.6,
-                    motivo: `🔥 FUNDO DE CICLO CRASH - RSI ${m1.rsi} extremo`
-                };
-            }
-            
-            // FASE 2: TOPO (vender para queda)
-            if (m1.rsi > config.rsiVenda && m1.adx < config.adxMinimo && m1.sinal === 'PUT') {
-                return {
-                    fase: 'TOPO_DO_CICLO',
-                    acao: 'VENDER_QUEDA',
-                    direcao: 'PUT',
-                    duracao: '10-15 minutos',
-                    confianca: 0.7,
-                    motivo: `🔥 TOPO DE CICLO CRASH - RSI ${m1.rsi} alto`
-                };
-            }
-        }
-        
-        // ===== PARA BOOM (tendência de ALTA) =====
-        if (this.tipoAtivo === 'BOOM') {
-            
-            // FASE 1: TOPO (vender para correção)
-            if (m1.rsi > config.rsiVenda && m1.adx > config.adxMinimo && m1.sinal === 'CALL') {
-                return {
-                    fase: 'TOPO_DO_CICLO',
-                    acao: 'VENDER_CORRECAO',
-                    direcao: 'PUT',
-                    duracao: '10-15 minutos',
-                    confianca: 0.6,
-                    motivo: `🔥 TOPO DE CICLO BOOM - RSI ${m1.rsi} extremo`
-                };
-            }
-            
-            // FASE 2: FUNDO (comprar para alta)
-            if (m1.rsi < config.rsiCompra && m1.adx < config.adxMinimo && m1.sinal === 'CALL') {
-                return {
-                    fase: 'FUNDO_DO_CICLO',
-                    acao: 'COMPRAR_ALTA',
-                    direcao: 'CALL',
-                    duracao: '10-15 minutos',
-                    confianca: 0.7,
-                    motivo: `🔥 FUNDO DE CICLO BOOM - RSI ${m1.rsi} baixo`
-                };
-            }
-        }
-        
-        // ===== PARA JUMP =====
-        if (this.tipoAtivo === 'JUMP') {
-            return this.detectarExplosaoJump();
-        }
-        
-        return null;
+    const consolidated = mtfManager.consolidateSignals();
+    const agreement = mtfManager.calculateAgreement();
+
+    // ========== PREÇO EM TEMPO REAL (VIA TICK) ==========
+    let currentPrice = 0;
+    let priceSource = 'unknown';
+
+    try {
+      const tickPrice = await getCurrentPrice(client, symbol);
+      if (tickPrice) {
+        currentPrice = tickPrice;
+        priceSource = 'tick';
+        console.log(`💰 Preço via tick: ${currentPrice}`);
+      }
+    } catch (error) {
+      console.log(`⚠️ Erro ao obter tick: ${error.message}`);
     }
 
-    // ========== DETECTAR PONTO FRANCO ==========
-    detectarPontoFranco() {
-        const h4 = this.allAnalyses['H4'];
-        const m1 = this.allAnalyses['M1'];
-        
-        if (!h4 || !m1) return null;
-        
-        const isEspecial = this.tipoAtivo !== 'DEFAULT';
-        if (!isEspecial) return null;
-        
-        const config = this.getConfigAtivo();
-        
-        // Caso 1: Ponto franco de QUEDA (PUT) - H4 PUT + M1 PUT com RSI baixo
-        if (h4.sinal === 'PUT' && h4.adx > 30 &&
-            m1.sinal === 'PUT' && m1.adx > 35 && 
-            m1.rsi < config.rsiCompra + 5) {
-            
-            const forca = (h4.adx / 40) * (m1.adx / 40) * ((config.rsiCompra + 10 - m1.rsi) / 20);
-            
-            return {
-                tipo: 'PONTO_FRANCO_QUEDA',
-                forca: Math.min(1, forca),
-                entrada: 'PUT',
-                confianca: 0.6 + (forca * 0.3),
-                motivo: `🔥 PONTO FRANCO: H4 PUT forte + M1 PUT com RSI ${m1.rsi}`
-            };
-        }
-        
-        // Caso 2: Ponto franco de ALTA (CALL) - H4 CALL + M1 CALL com RSI alto
-        if (h4.sinal === 'CALL' && h4.adx > 30 &&
-            m1.sinal === 'CALL' && m1.adx > 35 && 
-            m1.rsi > config.rsiVenda - 5) {
-            
-            const forca = (h4.adx / 40) * (m1.adx / 40) * ((m1.rsi - (config.rsiVenda - 10)) / 20);
-            
-            return {
-                tipo: 'PONTO_FRANCO_ALTA',
-                forca: Math.min(1, forca),
-                entrada: 'CALL',
-                confianca: 0.6 + (forca * 0.3),
-                motivo: `🔥 PONTO FRANCO: H4 CALL forte + M1 CALL com RSI ${m1.rsi}`
-            };
-        }
-        
-        return null;
+    if (!currentPrice) {
+      if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
+        currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
+        priceSource = 'M1';
+        console.log(`💰 Preço via M1: ${currentPrice}`);
+      } else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) {
+        currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual;
+        priceSource = 'M5';
+        console.log(`💰 Preço via M5: ${currentPrice}`);
+      } else {
+        const firstTf = timeframesToAnalyze[0]?.key || 'M5';
+        currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
+        priceSource = firstTf;
+        console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
+      }
+    }
+
+    const suggestion = BotExecutionCore.generateEntrySuggestion(
+      { sinal: consolidated.simpleMajority.signal, probabilidade: agreement.agreement / 100 },
+      currentPrice
+    );
+
+    let m1Timing = null, m5Timing = null, m15Timing = null;
+    const primarySignal = consolidated.simpleMajority.signal;
+
+    if (TRADING_MODES[mode].timeframes.includes('M1')) {
+      const m1Analysis = mtfManager.timeframes['M1']?.analysis;
+      m1Timing = calcularTimingM1(m1Analysis, primarySignal);
+    }
+    if (TRADING_MODES[mode].timeframes.includes('M5')) {
+      const m5Analysis = mtfManager.timeframes['M5']?.analysis;
+      m5Timing = calcularTimingM5(m5Analysis, primarySignal);
+    }
+    if (TRADING_MODES[mode].timeframes.includes('M15')) {
+      const m15Analysis = mtfManager.timeframes['M15']?.analysis;
+      m15Timing = calcularTimingM15(m15Analysis, primarySignal);
     }
 
     // ========== CALCULAR TIMING ESPECIAL ==========
-    calcularTimingEspecial(timeframeKey, analysis) {
-        if (!analysis || !this.simbolo) return null;
-        if (timeframeKey !== 'M1') return null;
-        
-        const config = this.getConfigAtivo();
-        const rsi = analysis.rsi;
-        const adx = analysis.adx;
-        const sinal = analysis.sinal;
-        
-        // Para CRASH: pontos de virada
-        if (this.tipoAtivo === 'CRASH') {
-            
-            // PONTO DE COMPRA (fundo do ciclo)
-            if (rsi < config.rsiCompra && adx > config.adxMinimo && sinal === 'PUT') {
-                return {
-                    permitido: true,
-                    acao: 'COMPRAR',
-                    timing: '✅ FUNDO DO CICLO',
-                    confianca: 0.7,
-                    motivo: `RSI ${rsi} extremo - fundo de ciclo CRASH`
-                };
-            }
-            
-            // PONTO DE VENDA (topo do ciclo)
-            if (rsi > config.rsiVenda && adx < config.adxMinimo && sinal === 'PUT') {
-                return {
-                    permitido: true,
-                    acao: 'VENDER',
-                    timing: '✅ TOPO DO CICLO',
-                    confianca: 0.7,
-                    motivo: `RSI ${rsi} alto - topo de ciclo CRASH`
-                };
-            }
-        }
-        
-        // Para BOOM: pontos de virada
-        if (this.tipoAtivo === 'BOOM') {
-            
-            // PONTO DE VENDA (topo do ciclo)
-            if (rsi > config.rsiVenda && adx > config.adxMinimo && sinal === 'CALL') {
-                return {
-                    permitido: true,
-                    acao: 'VENDER',
-                    timing: '✅ TOPO DO CICLO',
-                    confianca: 0.7,
-                    motivo: `RSI ${rsi} extremo - topo de ciclo BOOM`
-                };
-            }
-            
-            // PONTO DE COMPRA (fundo do ciclo)
-            if (rsi < config.rsiCompra && adx < config.adxMinimo && sinal === 'CALL') {
-                return {
-                    permitido: true,
-                    acao: 'COMPRAR',
-                    timing: '✅ FUNDO DO CICLO',
-                    confianca: 0.7,
-                    motivo: `RSI ${rsi} baixo - fundo de ciclo BOOM`
-                };
-            }
-        }
-        
-        return null;
+    let timingEspecial = null;
+    if (mtfManager.tipoAtivo !== 'DEFAULT') {
+      const m1Analysis = mtfManager.timeframes['M1']?.analysis;
+      if (m1Analysis) {
+        timingEspecial = mtfManager.calcularTimingEspecial('M1', m1Analysis);
+      }
     }
 
-    // ========== DETECTAR EXPLOSÃO JUMP ==========
-    detectarExplosaoJump() {
-        if (this.tipoAtivo !== 'JUMP') return null;
-        
-        const m1 = this.allAnalyses['M1'];
-        const m5 = this.allAnalyses['M5'];
-        
-        if (!m1 || !m5) return null;
-        
-        // Detectar movimento brusco no M1
-        if (m1.adx > 40 && Math.abs(m1.rsi - 50) > 20) {
-            return {
-                fase: 'EXPLOSAO_JUMP',
-                acao: m1.rsi > 60 ? 'COMPRAR' : 'VENDER',
-                direcao: m1.rsi > 60 ? 'CALL' : 'PUT',
-                duracao: '5-10 minutos',
-                confianca: 0.6,
-                motivo: `💥 JUMP DETECTADO: Movimento brusco com ADX ${m1.adx}`
-            };
-        }
-        
-        return null;
-    }
-
-    // ========== CALCULAR PESO ESPECÍFICO POR ATIVO ==========
-    calcularPesoEspecial(timeframeKey) {
-        const config = this.getConfigAtivo();
-        
-        switch(timeframeKey) {
-            case 'H4': return config.pesoH4;
-            case 'H1': return config.pesoH1;
-            case 'M15': return config.pesoM15;
-            case 'M5': return config.pesoM5;
-            case 'M1': return config.pesoM1;
-            default: return 1.0;
-        }
-    }
-
-    // ========== CALCULAR PESO DINÂMICO ==========
-    calcularPesoDinamico(timeframeKey, analysis) {
-        const pesoBase = this.TF_BASE_WEIGHT[timeframeKey] || 1.0;
-        const pesoEspecial = this.calcularPesoEspecial(timeframeKey);
-        
-        // Histórico de acertos
-        const historico = this.historicoAcertos[timeframeKey] || { acertos: 0, total: 1 };
-        const taxaAcerto = historico.total > 0 ? historico.acertos / historico.total : 0.5;
-        const pesoPorAcerto = 0.5 + (taxaAcerto * 0.5);
-        
-        // Ajustar baseado no ADX
-        const pesoADX = analysis.adx > 30 ? 1.2 : analysis.adx > 20 ? 1.0 : 0.6;
-        
-        return pesoBase * pesoEspecial * pesoPorAcerto * pesoADX;
-    }
-
-    addAnalysis(timeframeKey, analysis) {
-        if (this.timeframes[timeframeKey]) {
-            this.timeframes[timeframeKey].analysis = analysis;
-            this.allAnalyses[timeframeKey] = analysis;
-            
-            // ========== ARMAZENAR HISTÓRICO DE PREÇOS ==========
-            if (analysis && analysis.preco_atual) {
-                if (!this.priceHistory[timeframeKey]) {
-                    this.priceHistory[timeframeKey] = [];
-                }
-                this.priceHistory[timeframeKey].push({
-                    close: analysis.preco_atual,
-                    timestamp: Date.now()
-                });
-                if (this.priceHistory[timeframeKey].length > 50) {
-                    this.priceHistory[timeframeKey] = this.priceHistory[timeframeKey].slice(-50);
-                }
-            }
-            
-            // ========== ARMAZENAR HISTÓRICO DE RSI ==========
-            if (analysis && analysis.rsi) {
-                if (!this.ultimosRSI[timeframeKey]) {
-                    this.ultimosRSI[timeframeKey] = [];
-                }
-                this.ultimosRSI[timeframeKey].push(analysis.rsi);
-                if (this.ultimosRSI[timeframeKey].length > 20) {
-                    this.ultimosRSI[timeframeKey] = this.ultimosRSI[timeframeKey].slice(-20);
-                }
-            }
-            
-            if (!this.signalHistory[timeframeKey]) {
-                this.signalHistory[timeframeKey] = [];
-            }
-            if (analysis && analysis.sinal) {
-                this.signalHistory[timeframeKey].push(analysis.sinal);
-                const smoothing = SMOOTHING[timeframeKey] || SMOOTHING.DEFAULT;
-                const maxSize = smoothing.historySize;
-                if (this.signalHistory[timeframeKey].length > maxSize) {
-                    this.signalHistory[timeframeKey] = this.signalHistory[timeframeKey].slice(-maxSize);
-                }
-            }
-        }
-    }
-
-    getSmoothedSignal(timeframeKey) {
-        const history = this.signalHistory[timeframeKey];
-        if (!history || history.length === 0) return null;
-        const smoothing = SMOOTHING[timeframeKey] || SMOOTHING.DEFAULT;
-        if (history.length < smoothing.minAgreement) {
-            return history[history.length - 1];
-        }
-        const calls = history.filter(s => s === 'CALL').length;
-        const puts = history.filter(s => s === 'PUT').length;
-        if (calls >= smoothing.minAgreement) return 'CALL';
-        if (puts >= smoothing.minAgreement) return 'PUT';
-        return history[history.length - 1];
-    }
-
-    calcularPesoPorTF(timeframeKey, analysis) {
-        if (!analysis || !analysis.adx) return 0;
-        
-        const adx = analysis.adx;
-        const baseWeight = this.TF_BASE_WEIGHT[timeframeKey] || 1.0;
-        const thresholds = this.ADX_THRESHOLDS[timeframeKey] || { min: 15, ignore_below: 12 };
-        
-        if (adx < thresholds.ignore_below) {
-            return 0;
-        }
-        
-        if (adx < thresholds.min) {
-            const factor = (adx - thresholds.ignore_below) / (thresholds.min - thresholds.ignore_below);
-            return baseWeight * Math.max(0.3, factor);
-        }
-        
-        if (adx < 30) {
-            return baseWeight;
-        }
-        
-        const adxMultiplier = 1.0 + (Math.min(adx, 50) - 30) / 20;
-        return baseWeight * Math.min(2.0, adxMultiplier);
-    }
-
-    detectarDivergencias() {
-        const divergencias = [];
-        
-        const h4 = this.allAnalyses['H4'];
-        const h1 = this.allAnalyses['H1'];
-        const m30 = this.allAnalyses['M30'];
-        const m15 = this.allAnalyses['M15'];
-        const m5 = this.allAnalyses['M5'];
-        
-        if (h4 && h1 && h4.sinal !== h1.sinal) {
-            if (h4.adx >= 20 && h1.adx >= 20) {
-                divergencias.push({
-                    tipo: 'DIVERGENCIA_MAIOR',
-                    entre: ['H4', 'H1'],
-                    descricao: `H4 quer ${h4.sinal} mas H1 quer ${h1.sinal}`,
-                    severidade: 80
-                });
-            }
-        }
-        
-        if (h1 && m15 && h1.sinal !== m15.sinal) {
-            if (h1.adx >= 18 && m15.adx >= 15) {
-                divergencias.push({
-                    tipo: 'DIVERGENCIA_MEDIA',
-                    entre: ['H1', 'M15'],
-                    descricao: `H1 quer ${h1.sinal} mas M15 quer ${m15.sinal}`,
-                    severidade: 60
-                });
-            }
-        }
-        
-        const sinais = [];
-        if (h4) sinais.push({ tf: 'H4', sinal: h4.sinal, adx: h4.adx });
-        if (h1) sinais.push({ tf: 'H1', sinal: h1.sinal, adx: h1.adx });
-        if (m30) sinais.push({ tf: 'M30', sinal: m30.sinal, adx: m30.adx });
-        if (m15) sinais.push({ tf: 'M15', sinal: m15.sinal, adx: m15.adx });
-        
-        const calls = sinais.filter(s => s.sinal === 'CALL').length;
-        const puts = sinais.filter(s => s.sinal === 'PUT').length;
-        
-        if (calls > 0 && puts > 0 && (calls + puts) >= 3) {
-            divergencias.push({
-                tipo: 'MULTIPLA_DIVERGENCIA',
-                descricao: `${calls} CALL vs ${puts} PUT - mercado indefinido`,
-                severidade: 70
-            });
-        }
-        
-        return divergencias;
-    }
-
-    getTimeframeDominante() {
-        let maxPeso = 0;
-        let dominante = null;
-        
-        for (const [tf, analysis] of Object.entries(this.allAnalyses)) {
-            const peso = this.calcularPesoPorTF(tf, analysis);
-            if (peso > maxPeso) {
-                maxPeso = peso;
-                dominante = { tf, peso, sinal: analysis.sinal, adx: analysis.adx };
-            }
-        }
-        
-        return dominante;
-    }
-
-    calculateAgreement() {
-        const signals = [];
-        const timeframesWithData = [];
-
-        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
-            if (analysis && analysis.sinal) {
-                signals.push(analysis.sinal);
-                timeframesWithData.push(key);
-            }
-        }
-
-        if (signals.length === 0) return { agreement: 0, primarySignal: 'HOLD', callCount: 0, putCount: 0, totalTimeframes: 0, timeframes: [] };
-
-        const callCount = signals.filter(s => s === 'CALL').length;
-        const putCount = signals.filter(s => s === 'PUT').length;
-        const total = signals.length;
-        const primarySignal = callCount > putCount ? 'CALL' : (putCount > callCount ? 'PUT' : 'HOLD');
-        const consensus = total > 0 ? Math.max(callCount, putCount) / total * 100 : 0;
-
-        return {
-            agreement: consensus,
-            primarySignal,
-            callCount,
-            putCount,
-            totalTimeframes: total,
-            timeframes: timeframesWithData
+    const responseTimeframes = {};
+    TRADING_MODES[mode].timeframes.forEach(tfKey => {
+      const tfData = mtfManager.timeframes[tfKey];
+      if (tfData?.analysis) {
+        responseTimeframes[tfKey] = {
+          sinal: tfData.analysis.sinal,
+          probabilidade: tfData.analysis.probabilidade,
+          adx: tfData.analysis.adx,
+          rsi: tfData.analysis.rsi,
+          preco_atual: tfData.analysis.preco_atual
         };
+      }
+    });
+
+    const responseTime = Date.now() - startTime;
+    
+    const response = {
+      success: true,
+      mode: mode,
+      modeDescription: TRADING_MODES[mode].description,
+      consolidated: {
+        signal: consolidated.signal,
+        confidence: consolidated.confidence,
+        agreement: agreement.agreement,
+        simpleMajority: consolidated.simpleMajority,
+        timeframesAnalyzed: agreement.totalTimeframes,
+        sinal_premium: consolidated.sinal_premium || null,
+        price: currentPrice,
+        priceSource: priceSource,
+        ...(m1Timing && { m1_timing: m1Timing }),
+        ...(m5Timing && { m5_timing: m5Timing }),
+        ...(m15Timing && { m15_timing: m15Timing }),
+        // ========== NOVAS INFORMAÇÕES ==========
+        tipo_ativo: consolidated.tipo_ativo,
+        config_ativo: consolidated.config_ativo,
+        ciclo_completo: consolidated.ciclo_completo,
+        ponto_franco: consolidated.ponto_franco,
+        alinhamento_pescador: consolidated.alinhamento_pescador,
+        timing_especial: timingEspecial
+      },
+      agreement: {
+        agreement: agreement.agreement,
+        primarySignal: agreement.primarySignal,
+        callCount: agreement.callCount,
+        putCount: agreement.putCount,
+        totalTimeframes: agreement.totalTimeframes
+      },
+      suggestion: {
+        action: suggestion.action,
+        reason: suggestion.reason,
+        entry: suggestion.entry,
+        stopLoss: suggestion.stopLoss,
+        takeProfit: suggestion.takeProfit
+      },
+      timeframes: responseTimeframes,
+      metadata: {
+        responseTimeMs: responseTime,
+        timestamp: new Date().toISOString()
+      }
+    };
+
+    console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Tipo ativo: ${consolidated.tipo_ativo}`);
+    res.json(response);
+
+  } catch (error) {
+    console.error('❌ Erro na análise:', error);
+    res.status(500).json({ 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'Rota não encontrada' });
+});
+
+app.use((err, req, res, next) => {
+  console.error('❌ Erro global:', err);
+  res.status(500).json({ 
+    error: 'Erro interno do servidor',
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+
+const server = app.listen(PORT, async () => {
+  console.log(`\n🚀 Servidor rodando na porta ${PORT}`);
+  console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
+  console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
+  
+  try {
+    console.log('🔄 Iniciando conexão persistente com a Deriv...');
+    await getDerivClient();
+    console.log('✅ Conexão persistente estabelecida e mantida');
+  } catch (err) {
+    console.error('❌ Falha ao estabelecer conexão persistente:', err);
+  }
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Recebido SIGTERM, encerrando conexões...');
+  
+  server.close(() => {
+    console.log('✅ Servidor HTTP encerrado');
+    
+    if (derivClient) {
+      derivClient.disconnect();
+      console.log('✅ Cliente Deriv desconectado');
     }
-
-    registrarResultado(timeframeKey, acertou) {
-        if (!this.historicoAcertos[timeframeKey]) {
-            this.historicoAcertos[timeframeKey] = { acertos: 0, total: 0 };
-        }
-        this.historicoAcertos[timeframeKey].total++;
-        if (acertou) {
-            this.historicoAcertos[timeframeKey].acertos++;
-        }
-        const taxa = (this.historicoAcertos[timeframeKey].acertos / 
-                      this.historicoAcertos[timeframeKey].total * 100).toFixed(1);
-        console.log(`📊 Histórico ${timeframeKey}: ${taxa}% acertos`);
+    
+    if (redisClient) {
+      redisClient.quit();
+      console.log('✅ Cliente Redis desconectado');
     }
+    
+    process.exit(0);
+  });
+});
 
-    consolidateSignals() {
-        let totalWeight = 0;
-        let callWeight = 0;
-        let putWeight = 0;
-        let totalConfidence = 0;
-        let timeframesCount = 0;
-        const details = {};
+process.on('SIGINT', () => {
+  console.log('\n🛑 Recebido SIGINT, encerrando...');
+  process.emit('SIGTERM');
+});
 
-        let callCount = 0, putCount = 0, holdCount = 0;
-
-        // ========== DETECTAR INFORMAÇÕES ESPECIAIS ==========
-        const cicloCompleto = this.detectarCicloCompleto();
-        const pontoFranco = this.detectarPontoFranco();
-        const alinhamentoPescador = this.detectarAlinhamentoPescador();
-
-        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
-            if (!analysis) continue;
-            
-            const smoothedSignal = this.getSmoothedSignal(key);
-            const signalForWeight = smoothedSignal || analysis.sinal;
-            
-            // ========== USAR PESO DINÂMICO ==========
-            let weight = this.calcularPesoDinamico(key, analysis);
-            
-            // ========== AJUSTAR POR PONTO FRANCO ==========
-            if (pontoFranco && key === 'M1') {
-                if (pontoFranco.entrada === analysis.sinal) {
-                    weight *= 1.5;
-                    console.log(`⚖️ Ponto franco: peso M1 aumentado para ${weight.toFixed(2)}`);
-                }
-            }
-            
-            if (weight === 0) {
-                details[key] = {
-                    signal: analysis.sinal,
-                    smoothed: smoothedSignal,
-                    confidence: (analysis.probabilidade * 100).toFixed(1) + '%',
-                    price: analysis.preco_atual,
-                    adx: analysis.adx,
-                    status: 'IGNORADO (ADX baixo)'
-                };
-                continue;
-            }
-
-            totalWeight += weight;
-
-            if (signalForWeight === 'CALL') {
-                callCount++;
-                callWeight += weight * (analysis.probabilidade || 0.5);
-            } else if (signalForWeight === 'PUT') {
-                putCount++;
-                putWeight += weight * (analysis.probabilidade || 0.5);
-            } else {
-                holdCount++;
-                const holdConfidence = (analysis.probabilidade || 0.5) * 0.3;
-                callWeight += weight * holdConfidence * 0.5;
-                putWeight += weight * holdConfidence * 0.5;
-            }
-
-            totalConfidence += (analysis.probabilidade || 0.5) * 100;
-            timeframesCount++;
-
-            details[key] = {
-                signal: analysis.sinal,
-                smoothed: smoothedSignal,
-                confidence: (analysis.probabilidade * 100).toFixed(1) + '%',
-                price: analysis.preco_atual,
-                adx: analysis.adx,
-                weight: weight.toFixed(2),
-                trend: analysis.tendencia,
-                status: 'ATIVO'
-            };
-        }
-
-        if (totalWeight === 0 && timeframesCount > 0) {
-            console.warn("⚠️ Nenhum timeframe com ADX suficiente - usando o melhor disponível");
-            return this.consolidateSignalsFallback();
-        }
-
-        let primarySignal = 'HOLD';
-        
-        if (callCount === 0 && putCount === 0) {
-            primarySignal = 'HOLD';
-        }
-        else {
-            primarySignal = callWeight > putWeight ? 'CALL' : 'PUT';
-            
-            if (callWeight === putWeight) {
-                const dominante = this.getTimeframeDominante();
-                if (dominante && dominante.sinal !== 'HOLD') {
-                    primarySignal = dominante.sinal;
-                    console.log(`⚖️ Empate por peso → usando timeframe dominante: ${dominante.tf} (${dominante.sinal})`);
-                }
-            }
-            
-            console.log(`⚖️ Decisão: ${callCount}CALL/${putCount}PUT | Pesos: ${callWeight.toFixed(2)}/${putWeight.toFixed(2)} → ${primarySignal}`);
-        }
-
-        let agreement = 0;
-        if (primarySignal === 'CALL') {
-            agreement = callCount / (callCount + putCount + holdCount) * 100;
-        } else if (primarySignal === 'PUT') {
-            agreement = putCount / (callCount + putCount + holdCount) * 100;
-        } else {
-            agreement = holdCount / (callCount + putCount + holdCount) * 100;
-        }
-
-        let confidence = 0;
-        if (primarySignal === 'CALL') {
-            confidence = totalWeight > 0 ? callWeight / totalWeight : 0;
-        } else if (primarySignal === 'PUT') {
-            confidence = totalWeight > 0 ? putWeight / totalWeight : 0;
-        } else {
-            confidence = totalConfidence / (timeframesCount * 100) * 0.5;
-        }
-
-        const divergencias = this.detectarDivergencias();
-        const timeframeDominante = this.getTimeframeDominante();
-
-        if (divergencias.length > 0) {
-            const severidadeMedia = divergencias.reduce((acc, d) => acc + d.severidade, 0) / divergencias.length;
-            confidence *= (1 - (severidadeMedia / 200));
-        }
-
-        const majorityRatio = Math.max(callCount, putCount) / (callCount + putCount + holdCount);
-        confidence = confidence * (0.8 + 0.2 * majorityRatio);
-        confidence = Math.min(0.95, Math.max(0.05, confidence));
-
-        // ========== ADICIONAR INFORMAÇÕES ESPECIAIS AO RESULTADO ==========
-        this.consolidatedSignal = {
-            signal: primarySignal,
-            confidence: confidence,
-            agreement: agreement,
-            details,
-            timeframesAnalyzed: timeframesCount,
-            simpleMajority: {
-                signal: callCount > putCount ? 'CALL' : (putCount > callCount ? 'PUT' : 'HOLD'),
-                callCount,
-                putCount,
-                holdCount
-            },
-            allAnalyses: this.allAnalyses,
-            divergencias: divergencias,
-            timeframeDominante: timeframeDominante,
-            recomendacao: divergencias.length > 1 ? 'AGUARDAR' : 
-                          (confidence > 0.7 ? primarySignal : 'CAUTELA'),
-            // ========== NOVAS INFORMAÇÕES ==========
-            ciclo_completo: cicloCompleto,
-            ponto_franco: pontoFranco,
-            alinhamento_pescador: alinhamentoPescador,
-            tipo_ativo: this.tipoAtivo,
-            config_ativo: this.getConfigAtivo()
-        };
-
-        return this.consolidatedSignal;
-    }
-
-    consolidateSignalsFallback() {
-        let bestTF = null;
-        let bestADX = 0;
-        
-        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
-            if (analysis && analysis.adx > bestADX) {
-                bestADX = analysis.adx;
-                bestTF = { tf: key, analysis };
-            }
-        }
-        
-        if (bestTF) {
-            return {
-                signal: bestTF.analysis.sinal,
-                confidence: 0.4,
-                agreement: 33,
-                details: { [bestTF.tf]: bestTF.analysis },
-                timeframesAnalyzed: 1,
-                simpleMajority: {
-                    signal: bestTF.analysis.sinal,
-                    callCount: bestTF.analysis.sinal === 'CALL' ? 1 : 0,
-                    putCount: bestTF.analysis.sinal === 'PUT' ? 1 : 0,
-                    holdCount: 0
-                },
-                divergencias: [],
-                timeframeDominante: { tf: bestTF.tf, sinal: bestTF.analysis.sinal, adx: bestADX },
-                recomendacao: 'USAR_COM_CAUTELA',
-                tipo_ativo: this.tipoAtivo
-            };
-        }
-        
-        return {
-            signal: 'HOLD',
-            confidence: 0,
-            agreement: 0,
-            details: {},
-            timeframesAnalyzed: 0,
-            simpleMajority: { signal: 'HOLD', callCount: 0, putCount: 0, holdCount: 0 },
-            divergencias: [],
-            timeframeDominante: null,
-            recomendacao: 'AGUARDAR',
-            tipo_ativo: this.tipoAtivo
-        };
-    }
-
-    getDiagnostico() {
-        const timeframesAtivos = [];
-        const timeframesIgnorados = [];
-        
-        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
-            const peso = this.calcularPesoPorTF(key, analysis);
-            if (peso > 0) {
-                timeframesAtivos.push({ tf: key, adx: analysis.adx, peso });
-            } else {
-                timeframesIgnorados.push({ tf: key, adx: analysis.adx, motivo: 'ADX baixo' });
-            }
-        }
-        
-        return {
-            timeframesAtivos,
-            timeframesIgnorados,
-            timeframeDominante: this.getTimeframeDominante(),
-            divergencias: this.detectarDivergencias(),
-            tipo_ativo: this.tipoAtivo,
-            config_ativo: this.getConfigAtivo(),
-            ciclo_completo: this.detectarCicloCompleto(),
-            ponto_franco: this.detectarPontoFranco(),
-            alinhamento_pescador: this.detectarAlinhamentoPescador()
-        };
-    }
-}
-
-module.exports = MultiTimeframeManager;
+module.exports = app;
