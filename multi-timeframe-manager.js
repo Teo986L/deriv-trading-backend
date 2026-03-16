@@ -2,7 +2,7 @@
 const { SMOOTHING } = require('./config');
 
 class MultiTimeframeManager {
-    constructor() {
+    constructor(simbolo = '') {
         this.timeframes = {
             M1: { seconds: 60, label: '1m', data: null, analysis: null },
             M5: { seconds: 300, label: '5m', data: null, analysis: null },
@@ -16,14 +16,56 @@ class MultiTimeframeManager {
         this.allAnalyses = {};
         this.signalHistory = {};
         
+        // ========== NOVAS PROPRIEDADES PARA ANÁLISE AVANÇADA ==========
+        this.simbolo = simbolo;
+        this.tipoAtivo = this.detectarTipoAtivo(simbolo);
+        this.priceHistory = {
+            'M1': [], 'M5': [], 'M15': [], 'M30': [], 'H1': [], 'H4': [], 'H24': []
+        };
+        this.historicoAcertos = {
+            'M1': { acertos: 0, total: 0 }, 'M5': { acertos: 0, total: 0 },
+            'M15': { acertos: 0, total: 0 }, 'M30': { acertos: 0, total: 0 },
+            'H1': { acertos: 0, total: 0 }, 'H4': { acertos: 0, total: 0 },
+            'H24': { acertos: 0, total: 0 }
+        };
+        this.ultimosRSI = {};
+        
+        // ========== CONFIGURAÇÕES ESPECÍFICAS POR ATIVO ==========
+        this.CONFIG_ATIVO = {
+            'CRASH': {
+                rsiCompra: 35, rsiVenda: 60, adxMinimo: 25,
+                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
+                nome: 'Crash Index',
+                estrategia: 'Quedas violentas, comprar nas correções RSI<35, vender nos topos RSI>60'
+            },
+            'BOOM': {
+                rsiCompra: 40, rsiVenda: 65, adxMinimo: 25,
+                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
+                nome: 'Boom Index',
+                estrategia: 'Altas violentas, vender nas correções RSI>65, comprar nos fundos RSI<40'
+            },
+            'JUMP': {
+                rsiCompra: 45, rsiVenda: 55, adxMinimo: 30,
+                pesoH4: 2.0, pesoH1: 1.5, pesoM15: 1.5, pesoM5: 1.0, pesoM1: 0.8,
+                nome: 'Jump Index',
+                estrategia: 'Movimentos bruscos, operar após confirmação do salto'
+            },
+            'STEP': {
+                rsiCompra: 40, rsiVenda: 60, adxMinimo: 20,
+                pesoH4: 1.5, pesoH1: 1.3, pesoM15: 1.2, pesoM5: 1.0, pesoM1: 1.0,
+                nome: 'Step Index',
+                estrategia: 'Movimentos em degraus, operar quebras de suporte/resistência'
+            },
+            'DEFAULT': {
+                rsiCompra: 30, rsiVenda: 70, adxMinimo: 20,
+                pesoH4: 3.5, pesoH1: 3.0, pesoM15: 2.0, pesoM5: 1.5, pesoM1: 1.0,
+                nome: 'Default',
+                estrategia: 'Seguir tendência com todos os timeframes'
+            }
+        };
+        
         this.TF_BASE_WEIGHT = {
-            'M1': 1.0,
-            'M5': 1.5,
-            'M15': 2.0,
-            'M30': 2.5,
-            'H1': 3.0,
-            'H4': 3.5,
-            'H24': 4.0
+            'M1': 1.0, 'M5': 1.5, 'M15': 2.0, 'M30': 2.5, 'H1': 3.0, 'H4': 3.5, 'H24': 4.0
         };
         
         this.ADX_THRESHOLDS = {
@@ -37,10 +79,353 @@ class MultiTimeframeManager {
         };
     }
 
+    // ========== DETECTAR TIPO DE ATIVO ==========
+    detectarTipoAtivo(simbolo) {
+        if (!simbolo) return 'DEFAULT';
+        if (simbolo.includes('CRASH')) return 'CRASH';
+        if (simbolo.includes('BOOM')) return 'BOOM';
+        if (simbolo.includes('JUMP')) return 'JUMP';
+        if (simbolo.includes('STEP')) return 'STEP';
+        return 'DEFAULT';
+    }
+
+    // ========== OBTER CONFIGURAÇÃO DO ATIVO ==========
+    getConfigAtivo() {
+        return this.CONFIG_ATIVO[this.tipoAtivo] || this.CONFIG_ATIVO['DEFAULT'];
+    }
+
+    // ========== DETECTAR ALINHAMENTO PARA ENTRADA NO PESCADOR ==========
+    detectarAlinhamentoPescador() {
+        const pescador = this.consolidatedSignal;
+        const sniperM1 = this.allAnalyses['M1'];
+        
+        if (!pescador || !sniperM1) return null;
+        
+        const config = this.getConfigAtivo();
+        
+        // Se PESCADOR quer PUT mas SNIPER ainda está CALL
+        if (pescador.signal === 'PUT' && sniperM1.sinal === 'CALL') {
+            
+            // Detectar se SNIPER está perto de virar (RSI alto)
+            if (sniperM1.rsi > config.rsiVenda - 5 && sniperM1.adx > config.adxMinimo) {
+                return {
+                    status: 'AGUARDAR',
+                    direcaoPescador: 'PUT',
+                    direcaoSniper: 'CALL',
+                    motivo: `SNIPER ainda CALL mas RSI ${sniperM1.rsi} próximo de ${config.rsiVenda} - quase virando`,
+                    tempo_estimado: '5-10 minutos',
+                    entrada_quando: 'M1 virar PUT'
+                };
+            }
+            
+            if (sniperM1.rsi > config.rsiVenda) {
+                return {
+                    status: 'ATENÇÃO',
+                    direcaoPescador: 'PUT',
+                    direcaoSniper: 'CALL',
+                    motivo: `SNIPER sobrecomprado (RSI ${sniperM1.rsi}) - pode virar a qualquer momento`,
+                    tempo_estimado: '1-5 minutos',
+                    entrada_quando: 'M1 virar PUT'
+                };
+            }
+        }
+        
+        // Se PESCADOR quer CALL mas SNIPER ainda está PUT
+        if (pescador.signal === 'CALL' && sniperM1.sinal === 'PUT') {
+            
+            if (sniperM1.rsi < config.rsiCompra + 5 && sniperM1.adx > config.adxMinimo) {
+                return {
+                    status: 'AGUARDAR',
+                    direcaoPescador: 'CALL',
+                    direcaoSniper: 'PUT',
+                    motivo: `SNIPER ainda PUT mas RSI ${sniperM1.rsi} próximo de ${config.rsiCompra} - quase virando`,
+                    tempo_estimado: '5-10 minutos',
+                    entrada_quando: 'M1 virar CALL'
+                };
+            }
+            
+            if (sniperM1.rsi < config.rsiCompra) {
+                return {
+                    status: 'ATENÇÃO',
+                    direcaoPescador: 'CALL',
+                    direcaoSniper: 'PUT',
+                    motivo: `SNIPER sobrevendido (RSI ${sniperM1.rsi}) - pode virar a qualquer momento`,
+                    tempo_estimado: '1-5 minutos',
+                    entrada_quando: 'M1 virar CALL'
+                };
+            }
+        }
+        
+        return null;
+    }
+
+    // ========== DETECTAR CICLO COMPLETO ==========
+    detectarCicloCompleto() {
+        const h4 = this.allAnalyses['H4'];
+        const m1 = this.allAnalyses['M1'];
+        const config = this.getConfigAtivo();
+        
+        if (!h4 || !m1) return null;
+        
+        // ===== PARA CRASH (tendência de QUEDA) =====
+        if (this.tipoAtivo === 'CRASH') {
+            
+            // FASE 1: FUNDO (comprar para correção)
+            if (m1.rsi < config.rsiCompra && m1.adx > config.adxMinimo && m1.sinal === 'PUT') {
+                return {
+                    fase: 'FUNDO_DO_CICLO',
+                    acao: 'COMPRAR_CORRECAO',
+                    direcao: 'CALL',
+                    duracao: '10-15 minutos',
+                    confianca: 0.6,
+                    motivo: `🔥 FUNDO DE CICLO CRASH - RSI ${m1.rsi} extremo`
+                };
+            }
+            
+            // FASE 2: TOPO (vender para queda)
+            if (m1.rsi > config.rsiVenda && m1.adx < config.adxMinimo && m1.sinal === 'PUT') {
+                return {
+                    fase: 'TOPO_DO_CICLO',
+                    acao: 'VENDER_QUEDA',
+                    direcao: 'PUT',
+                    duracao: '10-15 minutos',
+                    confianca: 0.7,
+                    motivo: `🔥 TOPO DE CICLO CRASH - RSI ${m1.rsi} alto`
+                };
+            }
+        }
+        
+        // ===== PARA BOOM (tendência de ALTA) =====
+        if (this.tipoAtivo === 'BOOM') {
+            
+            // FASE 1: TOPO (vender para correção)
+            if (m1.rsi > config.rsiVenda && m1.adx > config.adxMinimo && m1.sinal === 'CALL') {
+                return {
+                    fase: 'TOPO_DO_CICLO',
+                    acao: 'VENDER_CORRECAO',
+                    direcao: 'PUT',
+                    duracao: '10-15 minutos',
+                    confianca: 0.6,
+                    motivo: `🔥 TOPO DE CICLO BOOM - RSI ${m1.rsi} extremo`
+                };
+            }
+            
+            // FASE 2: FUNDO (comprar para alta)
+            if (m1.rsi < config.rsiCompra && m1.adx < config.adxMinimo && m1.sinal === 'CALL') {
+                return {
+                    fase: 'FUNDO_DO_CICLO',
+                    acao: 'COMPRAR_ALTA',
+                    direcao: 'CALL',
+                    duracao: '10-15 minutos',
+                    confianca: 0.7,
+                    motivo: `🔥 FUNDO DE CICLO BOOM - RSI ${m1.rsi} baixo`
+                };
+            }
+        }
+        
+        // ===== PARA JUMP =====
+        if (this.tipoAtivo === 'JUMP') {
+            return this.detectarExplosaoJump();
+        }
+        
+        return null;
+    }
+
+    // ========== DETECTAR PONTO FRANCO ==========
+    detectarPontoFranco() {
+        const h4 = this.allAnalyses['H4'];
+        const m1 = this.allAnalyses['M1'];
+        
+        if (!h4 || !m1) return null;
+        
+        const isEspecial = this.tipoAtivo !== 'DEFAULT';
+        if (!isEspecial) return null;
+        
+        const config = this.getConfigAtivo();
+        
+        // Caso 1: Ponto franco de QUEDA (PUT) - H4 PUT + M1 PUT com RSI baixo
+        if (h4.sinal === 'PUT' && h4.adx > 30 &&
+            m1.sinal === 'PUT' && m1.adx > 35 && 
+            m1.rsi < config.rsiCompra + 5) {
+            
+            const forca = (h4.adx / 40) * (m1.adx / 40) * ((config.rsiCompra + 10 - m1.rsi) / 20);
+            
+            return {
+                tipo: 'PONTO_FRANCO_QUEDA',
+                forca: Math.min(1, forca),
+                entrada: 'PUT',
+                confianca: 0.6 + (forca * 0.3),
+                motivo: `🔥 PONTO FRANCO: H4 PUT forte + M1 PUT com RSI ${m1.rsi}`
+            };
+        }
+        
+        // Caso 2: Ponto franco de ALTA (CALL) - H4 CALL + M1 CALL com RSI alto
+        if (h4.sinal === 'CALL' && h4.adx > 30 &&
+            m1.sinal === 'CALL' && m1.adx > 35 && 
+            m1.rsi > config.rsiVenda - 5) {
+            
+            const forca = (h4.adx / 40) * (m1.adx / 40) * ((m1.rsi - (config.rsiVenda - 10)) / 20);
+            
+            return {
+                tipo: 'PONTO_FRANCO_ALTA',
+                forca: Math.min(1, forca),
+                entrada: 'CALL',
+                confianca: 0.6 + (forca * 0.3),
+                motivo: `🔥 PONTO FRANCO: H4 CALL forte + M1 CALL com RSI ${m1.rsi}`
+            };
+        }
+        
+        return null;
+    }
+
+    // ========== CALCULAR TIMING ESPECIAL ==========
+    calcularTimingEspecial(timeframeKey, analysis) {
+        if (!analysis || !this.simbolo) return null;
+        if (timeframeKey !== 'M1') return null;
+        
+        const config = this.getConfigAtivo();
+        const rsi = analysis.rsi;
+        const adx = analysis.adx;
+        const sinal = analysis.sinal;
+        
+        // Para CRASH: pontos de virada
+        if (this.tipoAtivo === 'CRASH') {
+            
+            // PONTO DE COMPRA (fundo do ciclo)
+            if (rsi < config.rsiCompra && adx > config.adxMinimo && sinal === 'PUT') {
+                return {
+                    permitido: true,
+                    acao: 'COMPRAR',
+                    timing: '✅ FUNDO DO CICLO',
+                    confianca: 0.7,
+                    motivo: `RSI ${rsi} extremo - fundo de ciclo CRASH`
+                };
+            }
+            
+            // PONTO DE VENDA (topo do ciclo)
+            if (rsi > config.rsiVenda && adx < config.adxMinimo && sinal === 'PUT') {
+                return {
+                    permitido: true,
+                    acao: 'VENDER',
+                    timing: '✅ TOPO DO CICLO',
+                    confianca: 0.7,
+                    motivo: `RSI ${rsi} alto - topo de ciclo CRASH`
+                };
+            }
+        }
+        
+        // Para BOOM: pontos de virada
+        if (this.tipoAtivo === 'BOOM') {
+            
+            // PONTO DE VENDA (topo do ciclo)
+            if (rsi > config.rsiVenda && adx > config.adxMinimo && sinal === 'CALL') {
+                return {
+                    permitido: true,
+                    acao: 'VENDER',
+                    timing: '✅ TOPO DO CICLO',
+                    confianca: 0.7,
+                    motivo: `RSI ${rsi} extremo - topo de ciclo BOOM`
+                };
+            }
+            
+            // PONTO DE COMPRA (fundo do ciclo)
+            if (rsi < config.rsiCompra && adx < config.adxMinimo && sinal === 'CALL') {
+                return {
+                    permitido: true,
+                    acao: 'COMPRAR',
+                    timing: '✅ FUNDO DO CICLO',
+                    confianca: 0.7,
+                    motivo: `RSI ${rsi} baixo - fundo de ciclo BOOM`
+                };
+            }
+        }
+        
+        return null;
+    }
+
+    // ========== DETECTAR EXPLOSÃO JUMP ==========
+    detectarExplosaoJump() {
+        if (this.tipoAtivo !== 'JUMP') return null;
+        
+        const m1 = this.allAnalyses['M1'];
+        const m5 = this.allAnalyses['M5'];
+        
+        if (!m1 || !m5) return null;
+        
+        // Detectar movimento brusco no M1
+        if (m1.adx > 40 && Math.abs(m1.rsi - 50) > 20) {
+            return {
+                fase: 'EXPLOSAO_JUMP',
+                acao: m1.rsi > 60 ? 'COMPRAR' : 'VENDER',
+                direcao: m1.rsi > 60 ? 'CALL' : 'PUT',
+                duracao: '5-10 minutos',
+                confianca: 0.6,
+                motivo: `💥 JUMP DETECTADO: Movimento brusco com ADX ${m1.adx}`
+            };
+        }
+        
+        return null;
+    }
+
+    // ========== CALCULAR PESO ESPECÍFICO POR ATIVO ==========
+    calcularPesoEspecial(timeframeKey) {
+        const config = this.getConfigAtivo();
+        
+        switch(timeframeKey) {
+            case 'H4': return config.pesoH4;
+            case 'H1': return config.pesoH1;
+            case 'M15': return config.pesoM15;
+            case 'M5': return config.pesoM5;
+            case 'M1': return config.pesoM1;
+            default: return 1.0;
+        }
+    }
+
+    // ========== CALCULAR PESO DINÂMICO ==========
+    calcularPesoDinamico(timeframeKey, analysis) {
+        const pesoBase = this.TF_BASE_WEIGHT[timeframeKey] || 1.0;
+        const pesoEspecial = this.calcularPesoEspecial(timeframeKey);
+        
+        // Histórico de acertos
+        const historico = this.historicoAcertos[timeframeKey] || { acertos: 0, total: 1 };
+        const taxaAcerto = historico.total > 0 ? historico.acertos / historico.total : 0.5;
+        const pesoPorAcerto = 0.5 + (taxaAcerto * 0.5);
+        
+        // Ajustar baseado no ADX
+        const pesoADX = analysis.adx > 30 ? 1.2 : analysis.adx > 20 ? 1.0 : 0.6;
+        
+        return pesoBase * pesoEspecial * pesoPorAcerto * pesoADX;
+    }
+
     addAnalysis(timeframeKey, analysis) {
         if (this.timeframes[timeframeKey]) {
             this.timeframes[timeframeKey].analysis = analysis;
             this.allAnalyses[timeframeKey] = analysis;
+            
+            // ========== ARMAZENAR HISTÓRICO DE PREÇOS ==========
+            if (analysis && analysis.preco_atual) {
+                if (!this.priceHistory[timeframeKey]) {
+                    this.priceHistory[timeframeKey] = [];
+                }
+                this.priceHistory[timeframeKey].push({
+                    close: analysis.preco_atual,
+                    timestamp: Date.now()
+                });
+                if (this.priceHistory[timeframeKey].length > 50) {
+                    this.priceHistory[timeframeKey] = this.priceHistory[timeframeKey].slice(-50);
+                }
+            }
+            
+            // ========== ARMAZENAR HISTÓRICO DE RSI ==========
+            if (analysis && analysis.rsi) {
+                if (!this.ultimosRSI[timeframeKey]) {
+                    this.ultimosRSI[timeframeKey] = [];
+                }
+                this.ultimosRSI[timeframeKey].push(analysis.rsi);
+                if (this.ultimosRSI[timeframeKey].length > 20) {
+                    this.ultimosRSI[timeframeKey] = this.ultimosRSI[timeframeKey].slice(-20);
+                }
+            }
             
             if (!this.signalHistory[timeframeKey]) {
                 this.signalHistory[timeframeKey] = [];
@@ -189,6 +574,19 @@ class MultiTimeframeManager {
         };
     }
 
+    registrarResultado(timeframeKey, acertou) {
+        if (!this.historicoAcertos[timeframeKey]) {
+            this.historicoAcertos[timeframeKey] = { acertos: 0, total: 0 };
+        }
+        this.historicoAcertos[timeframeKey].total++;
+        if (acertou) {
+            this.historicoAcertos[timeframeKey].acertos++;
+        }
+        const taxa = (this.historicoAcertos[timeframeKey].acertos / 
+                      this.historicoAcertos[timeframeKey].total * 100).toFixed(1);
+        console.log(`📊 Histórico ${timeframeKey}: ${taxa}% acertos`);
+    }
+
     consolidateSignals() {
         let totalWeight = 0;
         let callWeight = 0;
@@ -199,13 +597,27 @@ class MultiTimeframeManager {
 
         let callCount = 0, putCount = 0, holdCount = 0;
 
+        // ========== DETECTAR INFORMAÇÕES ESPECIAIS ==========
+        const cicloCompleto = this.detectarCicloCompleto();
+        const pontoFranco = this.detectarPontoFranco();
+        const alinhamentoPescador = this.detectarAlinhamentoPescador();
+
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
             if (!analysis) continue;
             
             const smoothedSignal = this.getSmoothedSignal(key);
             const signalForWeight = smoothedSignal || analysis.sinal;
             
-            const weight = this.calcularPesoPorTF(key, analysis);
+            // ========== USAR PESO DINÂMICO ==========
+            let weight = this.calcularPesoDinamico(key, analysis);
+            
+            // ========== AJUSTAR POR PONTO FRANCO ==========
+            if (pontoFranco && key === 'M1') {
+                if (pontoFranco.entrada === analysis.sinal) {
+                    weight *= 1.5;
+                    console.log(`⚖️ Ponto franco: peso M1 aumentado para ${weight.toFixed(2)}`);
+                }
+            }
             
             if (weight === 0) {
                 details[key] = {
@@ -254,17 +666,14 @@ class MultiTimeframeManager {
             return this.consolidateSignalsFallback();
         }
 
-        // ========== CORREÇÃO: LÓGICA DE EMPATE ==========
         let primarySignal = 'HOLD';
         
         if (callCount === 0 && putCount === 0) {
             primarySignal = 'HOLD';
         }
         else {
-            // 🔥 CORREÇÃO: Usar peso, não contagem, para decidir
             primarySignal = callWeight > putWeight ? 'CALL' : 'PUT';
             
-            // Se ainda assim houver empate, usar o timeframe dominante
             if (callWeight === putWeight) {
                 const dominante = this.getTimeframeDominante();
                 if (dominante && dominante.sinal !== 'HOLD') {
@@ -306,6 +715,7 @@ class MultiTimeframeManager {
         confidence = confidence * (0.8 + 0.2 * majorityRatio);
         confidence = Math.min(0.95, Math.max(0.05, confidence));
 
+        // ========== ADICIONAR INFORMAÇÕES ESPECIAIS AO RESULTADO ==========
         this.consolidatedSignal = {
             signal: primarySignal,
             confidence: confidence,
@@ -322,7 +732,13 @@ class MultiTimeframeManager {
             divergencias: divergencias,
             timeframeDominante: timeframeDominante,
             recomendacao: divergencias.length > 1 ? 'AGUARDAR' : 
-                          (confidence > 0.7 ? primarySignal : 'CAUTELA')
+                          (confidence > 0.7 ? primarySignal : 'CAUTELA'),
+            // ========== NOVAS INFORMAÇÕES ==========
+            ciclo_completo: cicloCompleto,
+            ponto_franco: pontoFranco,
+            alinhamento_pescador: alinhamentoPescador,
+            tipo_ativo: this.tipoAtivo,
+            config_ativo: this.getConfigAtivo()
         };
 
         return this.consolidatedSignal;
@@ -354,7 +770,8 @@ class MultiTimeframeManager {
                 },
                 divergencias: [],
                 timeframeDominante: { tf: bestTF.tf, sinal: bestTF.analysis.sinal, adx: bestADX },
-                recomendacao: 'USAR_COM_CAUTELA'
+                recomendacao: 'USAR_COM_CAUTELA',
+                tipo_ativo: this.tipoAtivo
             };
         }
         
@@ -367,7 +784,8 @@ class MultiTimeframeManager {
             simpleMajority: { signal: 'HOLD', callCount: 0, putCount: 0, holdCount: 0 },
             divergencias: [],
             timeframeDominante: null,
-            recomendacao: 'AGUARDAR'
+            recomendacao: 'AGUARDAR',
+            tipo_ativo: this.tipoAtivo
         };
     }
 
@@ -388,7 +806,12 @@ class MultiTimeframeManager {
             timeframesAtivos,
             timeframesIgnorados,
             timeframeDominante: this.getTimeframeDominante(),
-            divergencias: this.detectarDivergencias()
+            divergencias: this.detectarDivergencias(),
+            tipo_ativo: this.tipoAtivo,
+            config_ativo: this.getConfigAtivo(),
+            ciclo_completo: this.detectarCicloCompleto(),
+            ponto_franco: this.detectarPontoFranco(),
+            alinhamento_pescador: this.detectarAlinhamentoPescador()
         };
     }
 }
