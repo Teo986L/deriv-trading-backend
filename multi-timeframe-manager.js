@@ -30,31 +30,136 @@ class MultiTimeframeManager {
         };
         this.ultimosRSI = {};
         
-        // ========== CONFIGURAÇÕES ESPECÍFICAS POR ATIVO ==========
+        // ========== CONFIGURAÇÕES DINÂMICAS POR ATIVO ==========
         this.CONFIG_ATIVO = {
-            'CRASH': {
+            // ===== CRASH INDEX (todos os tipos) =====
+            'CRASH50': {
+                rsiCompra: 30, rsiVenda: 70, adxMinimo: 20,
+                pesoH4: 3.5, pesoH1: 3.0, pesoM15: 2.0, pesoM5: 1.5, pesoM1: 1.0,
+                nome: 'Crash 50 Index',
+                estrategia: 'Quedas suaves, RSI <30 comprar, RSI >70 vender'
+            },
+            'CRASH150N': {
+                rsiCompra: 32, rsiVenda: 72, adxMinimo: 22,
+                pesoH4: 3.3, pesoH1: 2.8, pesoM15: 1.8, pesoM5: 1.3, pesoM1: 0.9,
+                nome: 'Crash 150 Index',
+                estrategia: 'Quedas moderadas'
+            },
+            'CRASH300N': {
+                rsiCompra: 35, rsiVenda: 75, adxMinimo: 24,
+                pesoH4: 3.2, pesoH1: 2.5, pesoM15: 1.6, pesoM5: 1.2, pesoM1: 0.8,
+                nome: 'Crash 300 Index',
+                estrategia: 'Quedas médias'
+            },
+            'CRASH500': {
+                rsiCompra: 40, rsiVenda: 92, adxMinimo: 20,
+                pesoH4: 3.1, pesoH1: 2.3, pesoM15: 1.5, pesoM5: 1.1, pesoM1: 0.7,
+                nome: 'Crash 500 Index',
+                estrategia: 'MARATONISTA - sobe devagar por muito tempo, RSI <40 comprar, RSI >92 vender'
+            },
+            'CRASH600': {
+                rsiCompra: 35, rsiVenda: 60, adxMinimo: 20,
+                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
+                nome: 'Crash 600 Index',
+                estrategia: 'VELOCISTA - quedas violentas, RSI <35 comprar, RSI >60 vender'
+            },
+            'CRASH1000': {
                 rsiCompra: 35, rsiVenda: 60, adxMinimo: 25,
                 pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
-                nome: 'Crash Index',
-                estrategia: 'Quedas violentas, comprar nas correções RSI<35, vender nos topos RSI>60'
+                nome: 'Crash 1000 Index',
+                estrategia: 'EXPLOSIVO - quedas MUITO violentas, RSI <35 comprar, RSI >60 vender'
             },
-            'BOOM': {
-                rsiCompra: 40, rsiVenda: 65, adxMinimo: 25,
-                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
-                nome: 'Boom Index',
-                estrategia: 'Altas violentas, vender nas correções RSI>65, comprar nos fundos RSI<40'
+            
+            // ===== BOOM INDEX (todos os tipos) =====
+            'BOOM300N': {
+                rsiCompra: 35, rsiVenda: 75, adxMinimo: 25,
+                pesoH4: 3.0, pesoH1: 2.5, pesoM15: 1.5, pesoM5: 1.0, pesoM1: 0.8,
+                nome: 'Boom 300 Index',
+                estrategia: 'Altas fortes, RSI <35 comprar, RSI >75 vender'
             },
-            'JUMP': {
-                rsiCompra: 45, rsiVenda: 55, adxMinimo: 30,
+            'BOOM500': {
+                rsiCompra: 38, rsiVenda: 78, adxMinimo: 26,
+                pesoH4: 3.1, pesoH1: 2.4, pesoM15: 1.4, pesoM5: 0.9, pesoM1: 0.7,
+                nome: 'Boom 500 Index',
+                estrategia: 'Altas fortes'
+            },
+            'BOOM600': {
+                rsiCompra: 40, rsiVenda: 80, adxMinimo: 27,
+                pesoH4: 3.0, pesoH1: 2.2, pesoM15: 1.3, pesoM5: 0.8, pesoM1: 0.6,
+                nome: 'Boom 600 Index',
+                estrategia: 'Altas violentas'
+            },
+            'BOOM900': {
+                rsiCompra: 42, rsiVenda: 82, adxMinimo: 28,
+                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.7, pesoM1: 0.5,
+                nome: 'Boom 900 Index',
+                estrategia: 'Altas muito violentas'
+            },
+            'BOOM1000': {
+                rsiCompra: 45, rsiVenda: 85, adxMinimo: 30,
+                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.7, pesoM1: 0.5,
+                nome: 'Boom 1000 Index',
+                estrategia: 'EXTREMO - altas violentíssimas, RSI <45 comprar, RSI >85 vender'
+            },
+            
+            // ===== JUMP INDEX =====
+            'JUMP10': {
+                rsiCompra: 40, rsiVenda: 60, adxMinimo: 30,
+                pesoH4: 2.5, pesoH1: 2.0, pesoM15: 1.8, pesoM5: 1.5, pesoM1: 1.2,
+                nome: 'Jump 10 Index',
+                estrategia: 'Saltos moderados'
+            },
+            'JUMP25': {
+                rsiCompra: 38, rsiVenda: 62, adxMinimo: 32,
+                pesoH4: 2.4, pesoH1: 1.9, pesoM15: 1.7, pesoM5: 1.4, pesoM1: 1.1,
+                nome: 'Jump 25 Index',
+                estrategia: 'Saltos médios'
+            },
+            'JUMP50': {
+                rsiCompra: 35, rsiVenda: 65, adxMinimo: 35,
+                pesoH4: 2.3, pesoH1: 1.8, pesoM15: 1.6, pesoM5: 1.3, pesoM1: 1.0,
+                nome: 'Jump 50 Index',
+                estrategia: 'Saltos fortes'
+            },
+            'JUMP75': {
+                rsiCompra: 32, rsiVenda: 68, adxMinimo: 38,
+                pesoH4: 2.2, pesoH1: 1.7, pesoM15: 1.5, pesoM5: 1.2, pesoM1: 0.9,
+                nome: 'Jump 75 Index',
+                estrategia: 'Saltos muito fortes'
+            },
+            'JUMP100': {
+                rsiCompra: 30, rsiVenda: 70, adxMinimo: 40,
                 pesoH4: 2.0, pesoH1: 1.5, pesoM15: 1.5, pesoM5: 1.0, pesoM1: 0.8,
-                nome: 'Jump Index',
-                estrategia: 'Movimentos bruscos, operar após confirmação do salto'
+                nome: 'Jump 100 Index',
+                estrategia: 'Saltos extremos, RSI <30 comprar, RSI >70 vender'
             },
+            
+            // ===== STEP INDEX =====
             'STEP': {
                 rsiCompra: 40, rsiVenda: 60, adxMinimo: 20,
                 pesoH4: 1.5, pesoH1: 1.3, pesoM15: 1.2, pesoM5: 1.0, pesoM1: 1.0,
                 nome: 'Step Index',
-                estrategia: 'Movimentos em degraus, operar quebras de suporte/resistência'
+                estrategia: 'Movimentos em degraus, operar quebras'
+            },
+            
+            // ===== DEFAULTS (fallback) =====
+            'CRASH': {
+                rsiCompra: 35, rsiVenda: 65, adxMinimo: 25,
+                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
+                nome: 'Crash Index',
+                estrategia: 'Fallback para Crash não especificado'
+            },
+            'BOOM': {
+                rsiCompra: 40, rsiVenda: 80, adxMinimo: 25,
+                pesoH4: 3.0, pesoH1: 2.0, pesoM15: 1.2, pesoM5: 0.8, pesoM1: 0.6,
+                nome: 'Boom Index',
+                estrategia: 'Fallback para Boom não especificado'
+            },
+            'JUMP': {
+                rsiCompra: 35, rsiVenda: 65, adxMinimo: 30,
+                pesoH4: 2.0, pesoH1: 1.5, pesoM15: 1.5, pesoM5: 1.0, pesoM1: 0.8,
+                nome: 'Jump Index',
+                estrategia: 'Fallback para Jump não especificado'
             },
             'DEFAULT': {
                 rsiCompra: 30, rsiVenda: 70, adxMinimo: 20,
@@ -79,19 +184,140 @@ class MultiTimeframeManager {
         };
     }
 
-    // ========== DETECTAR TIPO DE ATIVO ==========
+    // ========== DETECTAR TIPO DE ATIVO (VERSÃO MELHORADA) ==========
     detectarTipoAtivo(simbolo) {
         if (!simbolo) return 'DEFAULT';
+        
+        // CRASH específicos
+        if (simbolo.includes('CRASH50')) return 'CRASH50';
+        if (simbolo.includes('CRASH150')) return 'CRASH150N';
+        if (simbolo.includes('CRASH300')) return 'CRASH300N';
+        if (simbolo.includes('CRASH500')) return 'CRASH500';
+        if (simbolo.includes('CRASH600')) return 'CRASH600';
+        if (simbolo.includes('CRASH1000')) return 'CRASH1000';
+        
+        // BOOM específicos
+        if (simbolo.includes('BOOM300')) return 'BOOM300N';
+        if (simbolo.includes('BOOM500')) return 'BOOM500';
+        if (simbolo.includes('BOOM600')) return 'BOOM600';
+        if (simbolo.includes('BOOM900')) return 'BOOM900';
+        if (simbolo.includes('BOOM1000')) return 'BOOM1000';
+        
+        // JUMP específicos
+        if (simbolo.includes('JD10')) return 'JUMP10';
+        if (simbolo.includes('JD25')) return 'JUMP25';
+        if (simbolo.includes('JD50')) return 'JUMP50';
+        if (simbolo.includes('JD75')) return 'JUMP75';
+        if (simbolo.includes('JD100')) return 'JUMP100';
+        
+        // STEP
+        if (simbolo.includes('stpRNG')) return 'STEP';
+        
+        // Famílias genéricas
         if (simbolo.includes('CRASH')) return 'CRASH';
         if (simbolo.includes('BOOM')) return 'BOOM';
         if (simbolo.includes('JUMP')) return 'JUMP';
-        if (simbolo.includes('STEP')) return 'STEP';
+        
         return 'DEFAULT';
     }
 
     // ========== OBTER CONFIGURAÇÃO DO ATIVO ==========
     getConfigAtivo() {
         return this.CONFIG_ATIVO[this.tipoAtivo] || this.CONFIG_ATIVO['DEFAULT'];
+    }
+
+    // ========== NOVO MÉTODO: DETECTAR SE É TENDÊNCIA REAL OU PADRÃO DO ATIVO ==========
+    detectarTipoTendencia() {
+        const h4 = this.allAnalyses['H4'];
+        const h1 = this.allAnalyses['H1'];
+        const m15 = this.allAnalyses['M15'];
+        const m5 = this.allAnalyses['M5'];
+        const m1 = this.allAnalyses['M1'];
+        
+        if (!h4 || !h1 || !m15) return null;
+        
+        // Verificar se todos os timeframes estão na mesma direção
+        const todosSinais = [h4?.sinal, h1?.sinal, m15?.sinal, m5?.sinal, m1?.sinal].filter(s => s);
+        const todosIguais = todosSinais.every(s => s === todosSinais[0]);
+        
+        if (todosIguais && todosSinais.length >= 3) {
+            return {
+                tipo: 'TENDENCIA_REAL',
+                direcao: todosSinais[0],
+                forca: 'ALTA',
+                estrategia: 'Seguir tendência, correções são oportunidades de entrada',
+                alerta: `NÃO É PADRÃO ${this.tipoAtivo} - é tendência legítima`
+            };
+        }
+        
+        // ===== DETECÇÃO DE PADRÕES ESPECÍFICOS POR ATIVO =====
+        
+        // PADRÃO CRASH (timeframes maiores PUT, menores CALL)
+        const maioresPUT = (h4?.sinal === 'PUT' && h1?.sinal === 'PUT');
+        const menoresCALL = (m15?.sinal === 'CALL' || m5?.sinal === 'CALL' || m1?.sinal === 'CALL');
+        
+        if (maioresPUT && menoresCALL) {
+            return {
+                tipo: `PADRAO_${this.tipoAtivo.includes('CRASH') ? 'CRASH' : 'DESCARTE'}`,
+                direcao: 'PUT',
+                forca: 'MÉDIA',
+                estrategia: this.tipoAtivo.includes('CRASH') 
+                    ? 'Vender nos topos (RSI > config.rsiVenda)' 
+                    : 'Possível reversão, aguardar confirmação',
+                alerta: this.tipoAtivo.includes('CRASH') 
+                    ? 'CRASH DETECTADO - operar correções' 
+                    : 'ATENÇÃO: Padrão CRASH em ativo não-CRASH'
+            };
+        }
+        
+        // PADRÃO BOOM (timeframes maiores CALL, menores PUT)
+        const maioresCALL = (h4?.sinal === 'CALL' && h1?.sinal === 'CALL');
+        const menoresPUT = (m15?.sinal === 'PUT' || m5?.sinal === 'PUT' || m1?.sinal === 'PUT');
+        
+        if (maioresCALL && menoresPUT) {
+            return {
+                tipo: `PADRAO_${this.tipoAtivo.includes('BOOM') ? 'BOOM' : 'ASCENDENTE'}`,
+                direcao: 'CALL',
+                forca: 'MÉDIA',
+                estrategia: this.tipoAtivo.includes('BOOM') 
+                    ? 'Comprar nos fundos (RSI < config.rsiCompra)' 
+                    : 'Possível continuação de alta, aguardar confirmação',
+                alerta: this.tipoAtivo.includes('BOOM') 
+                    ? 'BOOM DETECTADO - operar correções' 
+                    : 'ATENÇÃO: Padrão BOOM em ativo não-BOOM'
+            };
+        }
+        
+        // PADRÃO JUMP (movimentos bruscos)
+        if (this.tipoAtivo.includes('JUMP')) {
+            const jumpDetected = this.detectarExplosaoJump();
+            if (jumpDetected) {
+                return {
+                    tipo: 'PADRAO_JUMP',
+                    direcao: jumpDetected.direcao,
+                    forca: 'ALTA',
+                    estrategia: 'Operar o salto com stops apertados',
+                    alerta: 'JUMP DETECTADO - movimento brusco iminente'
+                };
+            }
+        }
+        
+        // PADRÃO STEP (movimentos em degraus)
+        if (this.tipoAtivo.includes('STEP')) {
+            // Lógica específica para STEP pode ser adicionada aqui
+            // Por enquanto, apenas retorna o padrão genérico
+            if (todosIguais) {
+                return {
+                    tipo: 'PADRAO_STEP',
+                    direcao: todosSinais[0],
+                    forca: 'MÉDIA',
+                    estrategia: 'Operar quebras dos degraus',
+                    alerta: 'STEP DETECTADO - aguardar quebra de nível'
+                };
+            }
+        }
+        
+        return null;
     }
 
     // ========== DETECTAR ALINHAMENTO PARA ENTRADA NO PESCADOR ==========
@@ -112,7 +338,7 @@ class MultiTimeframeManager {
                     status: 'AGUARDAR',
                     direcaoPescador: 'PUT',
                     direcaoSniper: 'CALL',
-                    motivo: `SNIPER ainda CALL mas RSI ${sniperM1.rsi} próximo de ${config.rsiVenda} - quase virando`,
+                    motivo: `SNIPER ainda CALL mas RSI ${sniperM1.rsi.toFixed(0)} próximo de ${config.rsiVenda} - quase virando`,
                     tempo_estimado: '5-10 minutos',
                     entrada_quando: 'M1 virar PUT'
                 };
@@ -123,7 +349,7 @@ class MultiTimeframeManager {
                     status: 'ATENÇÃO',
                     direcaoPescador: 'PUT',
                     direcaoSniper: 'CALL',
-                    motivo: `SNIPER sobrecomprado (RSI ${sniperM1.rsi}) - pode virar a qualquer momento`,
+                    motivo: `SNIPER sobrecomprado (RSI ${sniperM1.rsi.toFixed(0)}) - pode virar a qualquer momento`,
                     tempo_estimado: '1-5 minutos',
                     entrada_quando: 'M1 virar PUT'
                 };
@@ -138,7 +364,7 @@ class MultiTimeframeManager {
                     status: 'AGUARDAR',
                     direcaoPescador: 'CALL',
                     direcaoSniper: 'PUT',
-                    motivo: `SNIPER ainda PUT mas RSI ${sniperM1.rsi} próximo de ${config.rsiCompra} - quase virando`,
+                    motivo: `SNIPER ainda PUT mas RSI ${sniperM1.rsi.toFixed(0)} próximo de ${config.rsiCompra} - quase virando`,
                     tempo_estimado: '5-10 minutos',
                     entrada_quando: 'M1 virar CALL'
                 };
@@ -149,7 +375,7 @@ class MultiTimeframeManager {
                     status: 'ATENÇÃO',
                     direcaoPescador: 'CALL',
                     direcaoSniper: 'PUT',
-                    motivo: `SNIPER sobrevendido (RSI ${sniperM1.rsi}) - pode virar a qualquer momento`,
+                    motivo: `SNIPER sobrevendido (RSI ${sniperM1.rsi.toFixed(0)}) - pode virar a qualquer momento`,
                     tempo_estimado: '1-5 minutos',
                     entrada_quando: 'M1 virar CALL'
                 };
@@ -159,7 +385,7 @@ class MultiTimeframeManager {
         return null;
     }
 
-    // ========== DETECTAR CICLO COMPLETO ==========
+    // ========== DETECTAR CICLO COMPLETO (VERSÃO MELHORADA) ==========
     detectarCicloCompleto() {
         const h4 = this.allAnalyses['H4'];
         const m1 = this.allAnalyses['M1'];
@@ -167,10 +393,38 @@ class MultiTimeframeManager {
         
         if (!h4 || !m1) return null;
         
-        // ===== PARA CRASH (tendência de QUEDA) =====
-        if (this.tipoAtivo === 'CRASH') {
+        // Verificar primeiro se é TENDÊNCIA REAL (todos alinhados)
+        const tipoTendencia = this.detectarTipoTendencia();
+        
+        // ===== PARA CRASH (todos os tipos) =====
+        if (this.tipoAtivo.includes('CRASH')) {
             
-            // FASE 1: FUNDO (comprar para correção)
+            if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
+                // Em tendência real, usar limites mais extremos
+                if (m1.rsi < config.rsiCompra && m1.adx > config.adxMinimo) {
+                    return {
+                        fase: 'FUNDO_DA_TENDENCIA',
+                        acao: 'COMPRAR',
+                        direcao: tipoTendencia.direcao,
+                        duracao: '20-40 minutos',
+                        confianca: 0.7,
+                        motivo: `📈 TENDÊNCIA REAL: RSI ${m1.rsi.toFixed(0)} no fundo - comprar para nova perna`
+                    };
+                }
+                
+                if (m1.rsi > config.rsiVenda && m1.adx > 30) {
+                    return {
+                        fase: 'TOPO_DA_TENDENCIA',
+                        acao: 'VENDER',
+                        direcao: tipoTendencia.direcao === 'CALL' ? 'PUT' : 'CALL',
+                        duracao: '15-30 minutos',
+                        confianca: 0.8,
+                        motivo: `🔥 TOPO DE TENDÊNCIA: RSI ${m1.rsi.toFixed(0)} extremo - realizar lucro`
+                    };
+                }
+            }
+            
+            // FASE 1: FUNDO (comprar para correção) - padrão CRASH
             if (m1.rsi < config.rsiCompra && m1.adx > config.adxMinimo && m1.sinal === 'PUT') {
                 return {
                     fase: 'FUNDO_DO_CICLO',
@@ -178,7 +432,7 @@ class MultiTimeframeManager {
                     direcao: 'CALL',
                     duracao: '10-15 minutos',
                     confianca: 0.6,
-                    motivo: `🔥 FUNDO DE CICLO CRASH - RSI ${m1.rsi} extremo`
+                    motivo: `🔥 FUNDO DE CICLO ${this.tipoAtivo} - RSI ${m1.rsi.toFixed(0)} extremo`
                 };
             }
             
@@ -190,13 +444,38 @@ class MultiTimeframeManager {
                     direcao: 'PUT',
                     duracao: '10-15 minutos',
                     confianca: 0.7,
-                    motivo: `🔥 TOPO DE CICLO CRASH - RSI ${m1.rsi} alto`
+                    motivo: `🔥 TOPO DE CICLO ${this.tipoAtivo} - RSI ${m1.rsi.toFixed(0)} alto`
                 };
             }
         }
         
-        // ===== PARA BOOM (tendência de ALTA) =====
-        if (this.tipoAtivo === 'BOOM') {
+        // ===== PARA BOOM (todos os tipos) =====
+        if (this.tipoAtivo.includes('BOOM')) {
+            
+            if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
+                // Em tendência real, usar limites mais extremos
+                if (m1.rsi < config.rsiCompra && m1.adx > config.adxMinimo) {
+                    return {
+                        fase: 'FUNDO_DA_TENDENCIA',
+                        acao: 'COMPRAR',
+                        direcao: tipoTendencia.direcao,
+                        duracao: '20-40 minutos',
+                        confianca: 0.7,
+                        motivo: `📈 TENDÊNCIA REAL: RSI ${m1.rsi.toFixed(0)} no fundo - comprar`
+                    };
+                }
+                
+                if (m1.rsi > config.rsiVenda && m1.adx > 30) {
+                    return {
+                        fase: 'TOPO_DA_TENDENCIA',
+                        acao: 'VENDER',
+                        direcao: tipoTendencia.direcao === 'CALL' ? 'PUT' : 'CALL',
+                        duracao: '15-30 minutos',
+                        confianca: 0.8,
+                        motivo: `🔥 TOPO DE TENDÊNCIA: RSI ${m1.rsi.toFixed(0)} extremo - realizar lucro`
+                    };
+                }
+            }
             
             // FASE 1: TOPO (vender para correção)
             if (m1.rsi > config.rsiVenda && m1.adx > config.adxMinimo && m1.sinal === 'CALL') {
@@ -206,7 +485,7 @@ class MultiTimeframeManager {
                     direcao: 'PUT',
                     duracao: '10-15 minutos',
                     confianca: 0.6,
-                    motivo: `🔥 TOPO DE CICLO BOOM - RSI ${m1.rsi} extremo`
+                    motivo: `🔥 TOPO DE CICLO ${this.tipoAtivo} - RSI ${m1.rsi.toFixed(0)} extremo`
                 };
             }
             
@@ -218,13 +497,13 @@ class MultiTimeframeManager {
                     direcao: 'CALL',
                     duracao: '10-15 minutos',
                     confianca: 0.7,
-                    motivo: `🔥 FUNDO DE CICLO BOOM - RSI ${m1.rsi} baixo`
+                    motivo: `🔥 FUNDO DE CICLO ${this.tipoAtivo} - RSI ${m1.rsi.toFixed(0)} baixo`
                 };
             }
         }
         
         // ===== PARA JUMP =====
-        if (this.tipoAtivo === 'JUMP') {
+        if (this.tipoAtivo.includes('JUMP')) {
             return this.detectarExplosaoJump();
         }
         
@@ -255,7 +534,7 @@ class MultiTimeframeManager {
                 forca: Math.min(1, forca),
                 entrada: 'PUT',
                 confianca: 0.6 + (forca * 0.3),
-                motivo: `🔥 PONTO FRANCO: H4 PUT forte + M1 PUT com RSI ${m1.rsi}`
+                motivo: `🔥 PONTO FRANCO: H4 PUT forte + M1 PUT com RSI ${m1.rsi.toFixed(0)}`
             };
         }
         
@@ -271,7 +550,7 @@ class MultiTimeframeManager {
                 forca: Math.min(1, forca),
                 entrada: 'CALL',
                 confianca: 0.6 + (forca * 0.3),
-                motivo: `🔥 PONTO FRANCO: H4 CALL forte + M1 CALL com RSI ${m1.rsi}`
+                motivo: `🔥 PONTO FRANCO: H4 CALL forte + M1 CALL com RSI ${m1.rsi.toFixed(0)}`
             };
         }
         
@@ -288,17 +567,44 @@ class MultiTimeframeManager {
         const adx = analysis.adx;
         const sinal = analysis.sinal;
         
+        // Primeiro, verificar tipo de tendência
+        const tipoTendencia = this.detectarTipoTendencia();
+        
         // Para CRASH: pontos de virada
-        if (this.tipoAtivo === 'CRASH') {
+        if (this.tipoAtivo.includes('CRASH')) {
             
-            // PONTO DE COMPRA (fundo do ciclo)
+            // Se for tendência real, ajustar limites
+            if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
+                // Em tendência real, comprar nos fundos e vender nos topos
+                if (rsi < config.rsiCompra && adx > config.adxMinimo) {
+                    return {
+                        permitido: true,
+                        acao: 'COMPRAR',
+                        timing: '✅ FUNDO DA TENDÊNCIA',
+                        confianca: 0.8,
+                        motivo: `RSI ${rsi.toFixed(0)} no fundo - tendência real de ${tipoTendencia.direcao}`
+                    };
+                }
+                
+                if (rsi > config.rsiVenda && adx > 30) {
+                    return {
+                        permitido: true,
+                        acao: 'VENDER',
+                        timing: '✅ TOPO DA TENDÊNCIA',
+                        confianca: 0.8,
+                        motivo: `RSI ${rsi.toFixed(0)} extremo - realizar lucro na tendência`
+                    };
+                }
+            }
+            
+            // PONTO DE COMPRA (fundo do ciclo) - padrão CRASH
             if (rsi < config.rsiCompra && adx > config.adxMinimo && sinal === 'PUT') {
                 return {
                     permitido: true,
                     acao: 'COMPRAR',
                     timing: '✅ FUNDO DO CICLO',
                     confianca: 0.7,
-                    motivo: `RSI ${rsi} extremo - fundo de ciclo CRASH`
+                    motivo: `RSI ${rsi.toFixed(0)} extremo - fundo de ciclo ${this.tipoAtivo}`
                 };
             }
             
@@ -309,13 +615,36 @@ class MultiTimeframeManager {
                     acao: 'VENDER',
                     timing: '✅ TOPO DO CICLO',
                     confianca: 0.7,
-                    motivo: `RSI ${rsi} alto - topo de ciclo CRASH`
+                    motivo: `RSI ${rsi.toFixed(0)} alto - topo de ciclo ${this.tipoAtivo}`
                 };
             }
         }
         
         // Para BOOM: pontos de virada
-        if (this.tipoAtivo === 'BOOM') {
+        if (this.tipoAtivo.includes('BOOM')) {
+            
+            // Se for tendência real, ajustar limites
+            if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
+                if (rsi < config.rsiCompra && adx > config.adxMinimo) {
+                    return {
+                        permitido: true,
+                        acao: 'COMPRAR',
+                        timing: '✅ FUNDO DA TENDÊNCIA',
+                        confianca: 0.8,
+                        motivo: `RSI ${rsi.toFixed(0)} no fundo - tendência real de ${tipoTendencia.direcao}`
+                    };
+                }
+                
+                if (rsi > config.rsiVenda && adx > 30) {
+                    return {
+                        permitido: true,
+                        acao: 'VENDER',
+                        timing: '✅ TOPO DA TENDÊNCIA',
+                        confianca: 0.8,
+                        motivo: `RSI ${rsi.toFixed(0)} extremo - realizar lucro na tendência`
+                    };
+                }
+            }
             
             // PONTO DE VENDA (topo do ciclo)
             if (rsi > config.rsiVenda && adx > config.adxMinimo && sinal === 'CALL') {
@@ -324,7 +653,7 @@ class MultiTimeframeManager {
                     acao: 'VENDER',
                     timing: '✅ TOPO DO CICLO',
                     confianca: 0.7,
-                    motivo: `RSI ${rsi} extremo - topo de ciclo BOOM`
+                    motivo: `RSI ${rsi.toFixed(0)} extremo - topo de ciclo ${this.tipoAtivo}`
                 };
             }
             
@@ -335,7 +664,7 @@ class MultiTimeframeManager {
                     acao: 'COMPRAR',
                     timing: '✅ FUNDO DO CICLO',
                     confianca: 0.7,
-                    motivo: `RSI ${rsi} baixo - fundo de ciclo BOOM`
+                    motivo: `RSI ${rsi.toFixed(0)} baixo - fundo de ciclo ${this.tipoAtivo}`
                 };
             }
         }
@@ -345,7 +674,7 @@ class MultiTimeframeManager {
 
     // ========== DETECTAR EXPLOSÃO JUMP ==========
     detectarExplosaoJump() {
-        if (this.tipoAtivo !== 'JUMP') return null;
+        if (!this.tipoAtivo.includes('JUMP')) return null;
         
         const m1 = this.allAnalyses['M1'];
         const m5 = this.allAnalyses['M5'];
@@ -360,7 +689,7 @@ class MultiTimeframeManager {
                 direcao: m1.rsi > 60 ? 'CALL' : 'PUT',
                 duracao: '5-10 minutos',
                 confianca: 0.6,
-                motivo: `💥 JUMP DETECTADO: Movimento brusco com ADX ${m1.adx}`
+                motivo: `💥 JUMP DETECTADO: Movimento brusco com ADX ${m1.adx.toFixed(0)}`
             };
         }
         
@@ -598,9 +927,15 @@ class MultiTimeframeManager {
         let callCount = 0, putCount = 0, holdCount = 0;
 
         // ========== DETECTAR INFORMAÇÕES ESPECIAIS ==========
+        const tipoTendencia = this.detectarTipoTendencia();
         const cicloCompleto = this.detectarCicloCompleto();
         const pontoFranco = this.detectarPontoFranco();
         const alinhamentoPescador = this.detectarAlinhamentoPescador();
+
+        // Se for tendência real, logar
+        if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
+            console.log(`📊 TENDÊNCIA REAL DETECTADA: ${tipoTendencia.direcao} - ${tipoTendencia.alerta}`);
+        }
 
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
             if (!analysis) continue;
@@ -703,6 +1038,11 @@ class MultiTimeframeManager {
             confidence = totalConfidence / (timeframesCount * 100) * 0.5;
         }
 
+        // Se for tendência real, aumentar confiança
+        if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
+            confidence = Math.min(0.9, confidence * 1.2);
+        }
+
         const divergencias = this.detectarDivergencias();
         const timeframeDominante = this.getTimeframeDominante();
 
@@ -734,6 +1074,7 @@ class MultiTimeframeManager {
             recomendacao: divergencias.length > 1 ? 'AGUARDAR' : 
                           (confidence > 0.7 ? primarySignal : 'CAUTELA'),
             // ========== NOVAS INFORMAÇÕES ==========
+            tipo_tendencia: tipoTendencia,
             ciclo_completo: cicloCompleto,
             ponto_franco: pontoFranco,
             alinhamento_pescador: alinhamentoPescador,
@@ -809,6 +1150,7 @@ class MultiTimeframeManager {
             divergencias: this.detectarDivergencias(),
             tipo_ativo: this.tipoAtivo,
             config_ativo: this.getConfigAtivo(),
+            tipo_tendencia: this.detectarTipoTendencia(),
             ciclo_completo: this.detectarCicloCompleto(),
             ponto_franco: this.detectarPontoFranco(),
             alinhamento_pescador: this.detectarAlinhamentoPescador()
