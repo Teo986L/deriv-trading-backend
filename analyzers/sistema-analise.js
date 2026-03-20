@@ -13,6 +13,207 @@ const { calcularRSI, calcularMACD, calcularADXCompleto, calcularVolatilidade } =
 const { INDICATOR_CONFIG, TRADING_MODE, MARKET_STATE, CANDLE_CLOSE_TOLERANCE } = require('../config');
 const { institutionalSniper } = require('../institutional-sniper');
 
+// ========== SISTEMA DE FASES DO MACD ==========
+class MacdPhaseAnalyzer {
+    constructor() {
+        this.phases = {
+            STRONG_BULL: { 
+                name: 'ALTA FORTE', 
+                confidence: 0.85, 
+                action: 'CALL', 
+                description: 'MACD + Sinal + Histograma positivos',
+                icon: '🚀',
+                color: '#00ff88',
+                recomendacao: '🔥 Momento forte de alta - Operar CALL com convicção'
+            },
+            WEAK_BULL: { 
+                name: 'ALTA PERDENDO FORÇA', 
+                confidence: 0.45, 
+                action: 'HOLD', 
+                description: 'MACD e Sinal positivos, Histograma negativo',
+                icon: '⚠️',
+                color: '#ffc107',
+                recomendacao: '⚠️ Alta perdendo força - Aguardar ou realizar lucro'
+            },
+            CROSS_BEAR: { 
+                name: 'CRUZAMENTO BAIXA', 
+                confidence: 0.65, 
+                action: 'PUT', 
+                description: 'MACD negativo, Sinal positivo, Histograma negativo',
+                icon: '📉',
+                color: '#ff7f7f',
+                recomendacao: '🎯 Cruzamento de baixa confirmado - Iniciar operações de PUT'
+            },
+            STRONG_BEAR: { 
+                name: 'BAIXA FORTE', 
+                confidence: 0.85, 
+                action: 'PUT', 
+                description: 'MACD + Sinal + Histograma negativos',
+                icon: '🔥',
+                color: '#ff4b2b',
+                recomendacao: '🔥 Momento forte de baixa - Operar PUT com convicção'
+            },
+            CROSS_BULL: { 
+                name: 'CRUZAMENTO ALTA', 
+                confidence: 0.65, 
+                action: 'CALL', 
+                description: 'MACD positivo, Sinal negativo, Histograma positivo',
+                icon: '📈',
+                color: '#90EE90',
+                recomendacao: '🎯 Cruzamento de alta confirmado - Iniciar operações de CALL'
+            },
+            WEAK_BEAR: { 
+                name: 'BAIXA PERDENDO FORÇA', 
+                confidence: 0.45, 
+                action: 'HOLD', 
+                description: 'MACD e Sinal negativos, Histograma positivo',
+                icon: '⚠️',
+                color: '#ffc107',
+                recomendacao: '⚠️ Baixa perdendo força - Aguardar ou realizar lucro'
+            },
+            NEUTRAL: { 
+                name: 'NEUTRO', 
+                confidence: 0.35, 
+                action: 'HOLD', 
+                description: 'MACD próximo de zero',
+                icon: '⚪',
+                color: '#cccccc',
+                recomendacao: '⏳ Mercado indefinido - Aguardar melhor momento'
+            }
+        };
+    }
+
+    analyzePhase(macdData) {
+        if (!macdData || !macdData.valido) {
+            return { 
+                phase: 'NEUTRAL', 
+                ...this.phases.NEUTRAL,
+                status: {
+                    macd: '⚪ NEUTRO',
+                    sinal: '⚪ NEUTRO',
+                    histograma: '⚪ NEUTRO'
+                },
+                multiplier: 1.0
+            };
+        }
+
+        const { macd, sinal, histograma } = macdData;
+        
+        // Tolerância para considerar zero
+        const tolerance = 0.001;
+        const macdPos = macd > tolerance;
+        const macdNeg = macd < -tolerance;
+        const sinalPos = sinal > tolerance;
+        const sinalNeg = sinal < -tolerance;
+        const histPos = histograma > tolerance;
+        const histNeg = histograma < -tolerance;
+
+        let phase = 'NEUTRAL';
+        let status = {};
+
+        // FASE 1: ALTA FORTE 📈
+        if (macdPos && sinalPos && histPos) {
+            phase = 'STRONG_BULL';
+            status = {
+                macd: '✅ POSITIVO',
+                sinal: '✅ POSITIVO',
+                histograma: '✅ POSITIVO'
+            };
+        }
+        // FASE 2: ALTA PERDENDO FORÇA ⚠️
+        else if (macdPos && sinalPos && histNeg) {
+            phase = 'WEAK_BULL';
+            status = {
+                macd: '✅ POSITIVO',
+                sinal: '✅ POSITIVO',
+                histograma: '❌ NEGATIVO'
+            };
+        }
+        // FASE 3: CRUZAMENTO DE BAIXA 🔻
+        else if (macdNeg && sinalPos && histNeg) {
+            phase = 'CROSS_BEAR';
+            status = {
+                macd: '❌ NEGATIVO',
+                sinal: '✅ POSITIVO',
+                histograma: '❌ NEGATIVO'
+            };
+        }
+        // FASE 4: BAIXA FORTE 📉
+        else if (macdNeg && sinalNeg && histNeg) {
+            phase = 'STRONG_BEAR';
+            status = {
+                macd: '❌ NEGATIVO',
+                sinal: '❌ NEGATIVO',
+                histograma: '❌ NEGATIVO'
+            };
+        }
+        // FASE 5: CRUZAMENTO DE ALTA 🔺
+        else if (macdPos && sinalNeg && histPos) {
+            phase = 'CROSS_BULL';
+            status = {
+                macd: '✅ POSITIVO',
+                sinal: '❌ NEGATIVO',
+                histograma: '✅ POSITIVO'
+            };
+        }
+        // FASE 6: BAIXA PERDENDO FORÇA ⚠️
+        else if (macdNeg && sinalNeg && histPos) {
+            phase = 'WEAK_BEAR';
+            status = {
+                macd: '❌ NEGATIVO',
+                sinal: '❌ NEGATIVO',
+                histograma: '✅ POSITIVO'
+            };
+        }
+        // FASE 7: NEUTRO
+        else {
+            phase = 'NEUTRAL';
+            status = {
+                macd: '⚪ NEUTRO',
+                sinal: '⚪ NEUTRO',
+                histograma: '⚪ NEUTRO'
+            };
+        }
+
+        const multiplier = this.getPhaseMultiplier(phase);
+        const phaseData = this.phases[phase];
+
+        return {
+            phase,
+            ...phaseData,
+            status,
+            multiplier,
+            raw: {
+                macd: macd.toFixed(4),
+                sinal: sinal.toFixed(4),
+                histograma: histograma.toFixed(4)
+            }
+        };
+    }
+
+    getPhaseMultiplier(phase) {
+        const multipliers = {
+            'STRONG_BULL': 1.3,
+            'STRONG_BEAR': 1.3,
+            'CROSS_BULL': 1.2,
+            'CROSS_BEAR': 1.2,
+            'WEAK_BULL': 0.7,
+            'WEAK_BEAR': 0.7,
+            'NEUTRAL': 0.5
+        };
+        return multipliers[phase] || 1.0;
+    }
+
+    shouldTrade(phase) {
+        const tradeAllowed = ['STRONG_BULL', 'STRONG_BEAR', 'CROSS_BULL', 'CROSS_BEAR'];
+        return tradeAllowed.includes(phase);
+    }
+
+    getDescription(phase) {
+        return this.phases[phase]?.description || 'Fase não identificada';
+    }
+}
+
 class AutomatedElliottTradingSystem {
     constructor() {
         this.analyzer = new ElliottWaveMaster();
@@ -44,6 +245,7 @@ class SistemaAnaliseInteligente {
         this.advancedAnalyzer = new AdvancedMarketAnalyzer();
         this.velocidadeAnalyzer = new AnaliseVelocidadeIndicadores();
         this.zonaDeOuroPremium = new ZonaDeOuroPremium();
+        this.macdPhaseAnalyzer = new MacdPhaseAnalyzer(); // NOVO: Analisador de fases MACD
         
         this.multiTimeframeManager = new MultiTimeframeManager();
         this.timeframesData = {};
@@ -85,7 +287,7 @@ class SistemaAnaliseInteligente {
                 tipo: 'DIVERGÊNCIA BEARISH',
                 motivo: 'MACD e sinal positivos mas histograma negativo - MOMENTO CONTRÁRIO À TENDÊNCIA',
                 acao: 'HOLD',
-                probabilidadeReducao: 0.7 // 🔥 AUMENTADO de 0.5 para 0.7
+                probabilidadeReducao: 0.7
             };
         }
         
@@ -96,7 +298,7 @@ class SistemaAnaliseInteligente {
                 tipo: 'DIVERGÊNCIA BULLISH',
                 motivo: 'MACD e sinal negativos mas histograma positivo - MOMENTO CONTRÁRIO À TENDÊNCIA',
                 acao: 'HOLD',
-                probabilidadeReducao: 0.7 // 🔥 AUMENTADO de 0.5 para 0.7
+                probabilidadeReducao: 0.7
             };
         }
         
@@ -107,7 +309,7 @@ class SistemaAnaliseInteligente {
                 tipo: 'CRUZAMENTO DE ALTA RECENTE',
                 motivo: 'MACD acabou de cruzar para cima - AGUARDAR CONFIRMAÇÃO',
                 acao: 'HOLD',
-                probabilidadeReducao: 0.8 // 🔥 AUMENTADO de 0.7 para 0.8
+                probabilidadeReducao: 0.8
             };
         }
         
@@ -118,7 +320,7 @@ class SistemaAnaliseInteligente {
                 tipo: 'CRUZAMENTO DE BAIXA RECENTE',
                 motivo: 'MACD acabou de cruzar para baixo - AGUARDAR CONFIRMAÇÃO',
                 acao: 'HOLD',
-                probabilidadeReducao: 0.8 // 🔥 AUMENTADO de 0.7 para 0.8
+                probabilidadeReducao: 0.8
             };
         }
         
@@ -129,7 +331,7 @@ class SistemaAnaliseInteligente {
                 tipo: 'MACD NEUTRO',
                 motivo: 'MACD próximo de zero - TENDÊNCIA INDEFINIDA',
                 acao: 'HOLD',
-                probabilidadeReducao: 0.7 // 🔥 AUMENTADO de 0.6 para 0.7
+                probabilidadeReducao: 0.7
             };
         }
         
@@ -268,6 +470,15 @@ class SistemaAnaliseInteligente {
         const volatilidadeAtual = this.calcularVolatilidade(candles, precoAtual);
         const tendenciaMACD = this.verificarTendenciaMACD(macdResult);
 
+        // ========== NOVA ANÁLISE DE FASE MACD ==========
+        const macdPhase = this.macdPhaseAnalyzer.analyzePhase(macdResult);
+        
+        console.log(`\n📊 ANÁLISE DE FASE MACD:`);
+        console.log(`   Fase: ${macdPhase.phase} - ${macdPhase.name}`);
+        console.log(`   MACD: ${macdPhase.status.macd} | Sinal: ${macdPhase.status.sinal} | Hist: ${macdPhase.status.histograma}`);
+        console.log(`   Recomendação: ${macdPhase.recomendacao}`);
+        console.log(`   Multiplicador: ${macdPhase.multiplier.toFixed(2)}x`);
+
         // ========== DETECTAR DIVERGÊNCIAS MACD ==========
         const divergenciaMACD = this.detectarDivergenciaMACD(macdResult);
 
@@ -313,6 +524,7 @@ class SistemaAnaliseInteligente {
             tendencia: tendenciaMACD,
             velocidade_analysis: velocidadeAnalysis,
             macd: macdResult,
+            macd_phase: macdPhase, // NOVO: adicionar fase MACD
             elliott: elliottAnalysis.structure,
             quasimodo: confirmacaoQM,
             dupla_tendencia: {
@@ -320,7 +532,7 @@ class SistemaAnaliseInteligente {
                 probabilidade: sinalDupla.probabilidade,
                 convergencia: analiseDupla.convergencia
             },
-            divergencia_macd: divergenciaMACD // NOVO: adicionar à análise
+            divergencia_macd: divergenciaMACD
         };
         
         this.multiTimeframeManager.addAnalysis(timeframeKey, analiseAtual);
@@ -337,11 +549,19 @@ class SistemaAnaliseInteligente {
 
         // ========== APLICAR FILTRO DE DIVERGÊNCIA MACD ==========
         if (divergenciaMACD.divergencia) {
-            // 🔥 CORREÇÃO 3: Só reduz probabilidade, nunca força HOLD automaticamente
             probabilidade *= divergenciaMACD.probabilidadeReducao;
             explicacoes.push(`🚨 ${divergenciaMACD.tipo}: ${divergenciaMACD.motivo} (fator ${divergenciaMACD.probabilidadeReducao})`);
-            
-            // 🔥 REMOVIDO: Bloco que forçava HOLD quando probabilidadeReducao <= 0.5
+        }
+
+        // ========== APLICAR MULTIPLICADOR DA FASE MACD ==========
+        const phaseMultiplier = macdPhase.multiplier;
+        probabilidade *= phaseMultiplier;
+        explicacoes.push(`📊 Fase MACD: ${macdPhase.name} (x${phaseMultiplier.toFixed(2)})`);
+
+        // ========== VERIFICAR SE A FASE PERMITE TRADING ==========
+        if (!this.macdPhaseAnalyzer.shouldTrade(macdPhase.phase)) {
+            probabilidade *= 0.5;
+            explicacoes.push('⚠️ Fase MACD não recomendada para trading');
         }
 
         if (advancedAnalysis && advancedAnalysis.summary) {
@@ -465,7 +685,20 @@ class SistemaAnaliseInteligente {
             },
             advanced_analysis: advancedAnalysis,
             velocidade_analysis: velocidadeAnalysis,
-            divergencia_macd: divergenciaMACD, // NOVO: incluir no resultado
+            divergencia_macd: divergenciaMACD,
+            
+            // ========== NOVA INFORMAÇÃO DE FASE MACD ==========
+            macd_phase: {
+                phase: macdPhase.phase,
+                name: macdPhase.name,
+                icon: macdPhase.icon,
+                color: macdPhase.color,
+                confidence: macdPhase.confidence,
+                recomendacao: macdPhase.recomendacao,
+                multiplier: macdPhase.multiplier,
+                status: macdPhase.status,
+                raw: macdPhase.raw
+            },
             
             multi_timeframe: this.multiTimeframeManager.getDiagnostico ? 
                 this.multiTimeframeManager.getDiagnostico() : {
