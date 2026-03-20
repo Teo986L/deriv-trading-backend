@@ -272,8 +272,8 @@ class SistemaAnaliseInteligente {
         
         const { macd, sinal, histograma } = macdData;
         
-        // 🔥 CORREÇÃO 1: Se ADX for forte (> 30), IGNORAR divergências MACD
-        if (this._adxAtual && this._adxAtual > 30) {
+        // 🔥 CORREÇÃO 1: Se ADX for forte (> 25), IGNORAR divergências MACD
+        if (this._adxAtual && this._adxAtual > 25) {
             return { 
                 divergencia: false, 
                 motivo: `ADX forte (${this._adxAtual.toFixed(1)}) ignorando divergências` 
