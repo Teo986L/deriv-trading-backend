@@ -823,6 +823,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       }
     }
 
+    // ========== CONSTRUIR OBJETO DE TIMEFRAMES COM TODOS OS DETALHES ==========
     const responseTimeframes = {};
     TRADING_MODES[mode].timeframes.forEach(tfKey => {
       const tfData = mtfManager.timeframes[tfKey];
@@ -832,7 +833,11 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
           probabilidade: tfData.analysis.probabilidade,
           adx: tfData.analysis.adx,
           rsi: tfData.analysis.rsi,
-          preco_atual: tfData.analysis.preco_atual
+          preco_atual: tfData.analysis.preco_atual,
+          // ========== NOVOS CAMPOS ==========
+          macd_phase: tfData.analysis.macd_phase,        // objeto completo da fase MACD
+          divergencia_macd: tfData.analysis.divergencia_macd, // informação de divergência
+          // Outros campos relevantes podem ser adicionados aqui, se desejado
         };
       }
     });
