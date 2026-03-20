@@ -85,14 +85,15 @@ const TRADING_MODES = {
   }
 };
 
+// ========== CONFIGURAÇÃO ATUALIZADA - ALINHADA COM SCRIPT.JS ==========
 const ALL_TIMEFRAMES_CONFIG = {
-  'M1': { key: 'M1', seconds: 60, candleCount: 60, minRequired: 20 },
-  'M5': { key: 'M5', seconds: 300, candleCount: 72, minRequired: 30 },
-  'M15': { key: 'M15', seconds: 900, candleCount: 96, minRequired: 20 },
-  'M30': { key: 'M30', seconds: 1800, candleCount: 46, minRequired: 15 },
-  'H1': { key: 'H1', seconds: 3600, candleCount: 48, minRequired: 10 },
-  'H4': { key: 'H4', seconds: 14400, candleCount: 42, minRequired: 8 },
-  'H24': { key: 'H24', seconds: 86400, candleCount: 20, minRequired: 5 }
+  'M1': { key: 'M1', seconds: 60, candleCount: 400, minRequired: 50 },
+  'M5': { key: 'M5', seconds: 300, candleCount: 400, minRequired: 50 },
+  'M15': { key: 'M15', seconds: 900, candleCount: 400, minRequired: 50 },
+  'M30': { key: 'M30', seconds: 1800, candleCount: 400, minRequired: 50 },
+  'H1': { key: 'H1', seconds: 3600, candleCount: 400, minRequired: 50 },
+  'H4': { key: 'H4', seconds: 14400, candleCount: 400, minRequired: 50 },
+  'H24': { key: 'H24', seconds: 86400, candleCount: 400, minRequired: 50 }
 };
 
 function isCandleClosed(candle, timeframeSeconds) {
@@ -103,20 +104,33 @@ function isCandleClosed(candle, timeframeSeconds) {
 }
 
 async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
+  // Se não tiver Redis ou forçar atualização, busca direto da Deriv
   if (!redisClient || !redisClient.isReady || forceFresh) {
-    console.log(`🔄 Buscando ${tf.key} direto da Deriv (sem cache)`);
-    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+    console.log(`🔄 Buscando ${tf.key} direto da Deriv (${tf.candleCount} candles)`);
+    
+    // Pede 400 candles como no script.js original
+    const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+    
     if (!Array.isArray(candles)) {
       console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
       return candles;
     }
+    
+    // Script.js NÃO filtra candles fechados, mas vamos manter o filtro
+    // para usar apenas candles completos (mais seguro)
     const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
+    
+    console.log(`📊 ${tf.key}: recebidos ${candles.length} candles, ${closedCandles.length} fechados`);
+    
     if (closedCandles.length < tf.minRequired) {
       console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
+      // Ainda assim retorna os candles fechados para análise
     }
+    
     return closedCandles;
   }
 
+  // Com Redis - usar cache
   const cacheKey = `candles:${symbol}:${tf.key}`;
   
   try {
@@ -126,15 +140,17 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
       const ttl = await redisClient.ttl(cacheKey);
       console.log(`✅ Cache hit: ${cacheKey} (TTL: ${ttl}s)`);
       
+      // Atualizar cache em background se estiver perto de expirar
       if (ttl < 5) {
         setTimeout(async () => {
           try {
-            const freshCandles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+            console.log(`🔄 Atualizando cache em background: ${cacheKey}`);
+            const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
             if (Array.isArray(freshCandles)) {
               const closedCandles = freshCandles.filter(c => isCandleClosed(c, tf.seconds));
               const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
               await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
-              console.log(`🔄 Cache atualizado em background: ${cacheKey}`);
+              console.log(`✅ Cache atualizado: ${cacheKey} (${closedCandles.length} candles)`);
             }
           } catch (err) {
             console.error(`❌ Erro atualizando cache em background: ${err.message}`);
@@ -145,8 +161,9 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
       return JSON.parse(cached);
     }
     
-    console.log(`🔄 Cache miss: ${cacheKey} - buscando da Deriv`);
-    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+    // Cache miss - buscar da Deriv e armazenar
+    console.log(`🔄 Cache miss: ${cacheKey} - buscando ${tf.candleCount} candles da Deriv`);
+    const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
     
     if (!Array.isArray(candles)) {
       console.error(`❌ Resposta inválida da Deriv para ${cacheKey}: não é um array`);
@@ -154,18 +171,22 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
     }
     
     const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
+    console.log(`📊 ${tf.key}: ${closedCandles.length} candles fechados de ${candles.length} recebidos`);
     
     if (closedCandles.length < tf.minRequired) {
       console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
     }
     
+    // Armazenar no cache
     const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
     await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
     
     return closedCandles;
+    
   } catch (error) {
     console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
-    const candles = await client.getCandles(symbol, tf.candleCount + 1, tf.seconds);
+    // Fallback: buscar direto da Deriv sem cache
+    const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
     if (!Array.isArray(candles)) return candles;
     return candles.filter(c => isCandleClosed(c, tf.seconds));
   }
@@ -893,6 +914,7 @@ const server = app.listen(PORT, async () => {
   console.log(`\n🚀 Servidor rodando na porta ${PORT}`);
   console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
   console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`📊 Configuração de candles: 400 para todos os timeframes (igual ao script.js)`);
   
   try {
     console.log('🔄 Iniciando conexão persistente com a Deriv...');
