@@ -758,7 +758,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       }
     }
 
-       const consolidated = mtfManager.consolidateSignals();
+        const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
     // ========== BLOQUEIO POR DIVERGÊNCIA MACD ==========
@@ -783,7 +783,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
     // ========== PREÇO EM TEMPO REAL (VIA TICK) ==========
     let currentPrice = 0;
-    let priceSource = 'unknown';;
+    let priceSource = 'unknown';
 
     try {
       const tickPrice = await getCurrentPrice(client, symbol);
