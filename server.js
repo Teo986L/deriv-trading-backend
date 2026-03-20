@@ -758,12 +758,32 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       }
     }
 
-    const consolidated = mtfManager.consolidateSignals();
+       const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
+
+    // ========== BLOQUEIO POR DIVERGÊNCIA MACD ==========
+    // Verifica qualquer timeframe do modo atual
+    let hasMacdDivergence = false;
+    for (const tfKey of TRADING_MODES[mode].timeframes) {
+      const analysis = mtfManager.timeframes[tfKey]?.analysis;
+      if (analysis && analysis.divergencia_macd && analysis.divergencia_macd.divergencia) {
+        hasMacdDivergence = true;
+        console.log(`⚠️ Divergência MACD detectada em ${tfKey} - forçando HOLD (${analysis.divergencia_macd.tipo})`);
+        break; // basta uma divergência para bloquear
+      }
+    }
+    if (hasMacdDivergence) {
+      // Força sinal HOLD e reduz confiança
+      consolidated.simpleMajority.signal = "HOLD";
+      consolidated.signal = "HOLD";
+      consolidated.confidence = Math.min(consolidated.confidence, 0.3);
+      // NÃO inclui motivo na resposta (apenas log)
+    }
+    // =================================================
 
     // ========== PREÇO EM TEMPO REAL (VIA TICK) ==========
     let currentPrice = 0;
-    let priceSource = 'unknown';
+    let priceSource = 'unknown';;
 
     try {
       const tickPrice = await getCurrentPrice(client, symbol);
