@@ -486,6 +486,13 @@ class SistemaAnaliseInteligente {
             candles, macdResult, rsi, adxData
         );
         const sinalDupla = this.sistemaDuplaTendencia.calcularSinalFinal(analiseDupla);
+
+        // ========== NOVO: FORÇAR HOLD SE HOUVER DIVERGÊNCIA MACD ==========
+        if (divergenciaMACD.divergencia) {
+            console.log(`   ⛔ Divergência MACD detectada: forçando HOLD para ${timeframeKey}`);
+            sinalDupla.sinal = 'HOLD';
+            sinalDupla.probabilidade = 0.3; // valor baixo para anular peso
+        }
         
         const sinalCombinado = this.quasimodoAnalyzer.generateCombinedSignal(
             candles, macdResult.histograma, rsi
