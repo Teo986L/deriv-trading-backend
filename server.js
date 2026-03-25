@@ -7,6 +7,7 @@ const DerivClient = require('./deriv-client');
 const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
 const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
+const TraderBotAnalise = require('./analyzers/trader-bot-analyzer');
 const { API_TOKEN, CANDLE_CLOSE_TOLERANCE, SMOOTHING } = require('./config');
 
 const app = express();
@@ -729,6 +730,9 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
     }
 
+    // Armazenar candles históricos para o TraderBotAnalise
+    let historicalCandles = null;
+
     for (const tf of timeframesToAnalyze) {
       try {
         console.log(`🔍 Analisando ${tf.key}...`);
@@ -740,6 +744,11 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         if (!Array.isArray(candles)) {
           console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
           continue;
+        }
+        
+        // Guardar candles do M1 para usar no cálculo de ATR
+        if (tf.key === 'M1' && candles && candles.length > 0) {
+          historicalCandles = candles;
         }
         
         if (candles.length < tf.minRequired) {
@@ -758,7 +767,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       }
     }
 
-        const consolidated = mtfManager.consolidateSignals();
+    const consolidated = mtfManager.consolidateSignals();
     const agreement = mtfManager.calculateAgreement();
 
     // ========== BLOQUEIO POR DIVERGÊNCIA MACD ==========
@@ -843,6 +852,58 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       }
     }
 
+    // ========== ANÁLISE REFINADA COM TRADER BOT ANALYZER ==========
+    let analiseRefinada = null;
+    let validacaoRisco = null;
+
+    try {
+      // Construir dados no formato esperado pelo TraderBotAnalise
+      const dadosMercado = {
+        ativo: symbol,
+        precoAtual: currentPrice,
+        volume: 0, // Volume não está disponível via API da Deriv
+        precosHistoricos: historicalCandles || [], // Usar candles do M1 para ATR
+        timeframes: {}
+      };
+
+      // Preencher timeframes com as análises já existentes
+      for (const tfKey of TRADING_MODES[mode].timeframes) {
+        const analysis = mtfManager.timeframes[tfKey]?.analysis;
+        if (analysis) {
+          dadosMercado.timeframes[tfKey] = {
+            adx: analysis.adx || 25,
+            rsi: analysis.rsi || 50,
+            tendencia: analysis.sinal || 'HOLD',
+            volatilidade: analysis.volatilidade || 1.0,
+            precoAtual: analysis.preco_atual || currentPrice,
+            precos: [] // não necessário pois já temos os valores prontos
+          };
+        }
+      }
+
+      // Criar instância do analisador refinado
+      const botAnalise = new TraderBotAnalise({
+        confiancaMinimaOperar: 60,
+        confiancaAlta: 75,
+        adxTendenciaForte: 25,
+        adxSemTendencia: 20
+      });
+
+      // Gerar análise refinada
+      analiseRefinada = botAnalise.gerarAnalise(dadosMercado, mode);
+      
+      // Validar operação com base no risco (assumindo saldo padrão de $1000)
+      const saldoUsuario = req.user?.saldo || 1000;
+      validacaoRisco = botAnalise.validarOperacao(analiseRefinada, saldoUsuario, 2);
+      
+      console.log(`📊 Análise refinada: sinal=${analiseRefinada.sinal.direcao}, confiança=${analiseRefinada.sinal.confianca}%`);
+      
+    } catch (err) {
+      console.error('❌ Erro na análise refinada:', err.message);
+      // Não falha a requisição principal se a análise refinada falhar
+      analiseRefinada = { erro: err.message };
+    }
+
     // ========== CONSTRUIR OBJETO DE TIMEFRAMES COM TODOS OS DETALHES ==========
     const responseTimeframes = {};
     TRADING_MODES[mode].timeframes.forEach(tfKey => {
@@ -855,9 +916,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
           rsi: tfData.analysis.rsi,
           preco_atual: tfData.analysis.preco_atual,
           // ========== NOVOS CAMPOS ==========
-          macd_phase: tfData.analysis.macd_phase,        // objeto completo da fase MACD
-          divergencia_macd: tfData.analysis.divergencia_macd, // informação de divergência
-          // Outros campos relevantes podem ser adicionados aqui, se desejado
+          macd_phase: tfData.analysis.macd_phase,
+          divergencia_macd: tfData.analysis.divergencia_macd,
         };
       }
     });
@@ -903,6 +963,9 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         takeProfit: suggestion.takeProfit
       },
       timeframes: responseTimeframes,
+      // ========== ANÁLISE REFINADA ADICIONADA ==========
+      refined_analysis: analiseRefinada,
+      risk_validation: validacaoRisco,
       metadata: {
         responseTimeMs: responseTime,
         timestamp: new Date().toISOString()
@@ -940,6 +1003,7 @@ const server = app.listen(PORT, async () => {
   console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
   console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📊 Configuração de candles: 400 para todos os timeframes (igual ao script.js)`);
+  console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança`);
   
   try {
     console.log('🔄 Iniciando conexão persistente com a Deriv...');
