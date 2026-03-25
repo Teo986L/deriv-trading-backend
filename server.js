@@ -912,6 +912,15 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     let validacaoRisco = null;
 
     try {
+      // 🔥 CORREÇÃO: mapeia o modo com acento para o formato esperado pelo TraderBotAnalise
+      const modeMap = {
+        'SNIPER': 'SNIPER',
+        'CAÇADOR': 'CACADOR',
+        'PESCADOR': 'PESCADOR'
+      };
+      const modoIngles = modeMap[mode] || 'CACADOR';
+      console.log(`🔄 Mapeando modo: ${mode} → ${modoIngles}`);
+
       // Construir dados no formato esperado pelo TraderBotAnalise
       const dadosMercado = {
         ativo: symbol,
@@ -944,8 +953,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         adxSemTendencia: 20
       });
 
-      // Gerar análise refinada
-      analiseRefinada = botAnalise.gerarAnalise(dadosMercado, mode);
+      // Gerar análise refinada usando o modo mapeado
+      analiseRefinada = botAnalise.gerarAnalise(dadosMercado, modoIngles);
       
       // Validar operação com base no risco (assumindo saldo padrão de $1000)
       const saldoUsuario = req.user?.saldo || 1000;
