@@ -90,7 +90,7 @@ const TRADING_MODES = {
 function getATRTimeframeByMode(mode) {
   const modeATRMap = {
     'SNIPER': 'M1',
-    'CAÇADOR': 'M5',
+    'CACADOR': 'M5',
     'PESCADOR': 'M15'
   };
   return modeATRMap[mode] || 'M5'; // fallback para M5
