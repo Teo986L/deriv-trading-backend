@@ -86,6 +86,16 @@ const TRADING_MODES = {
   }
 };
 
+// ========== FUNÇÃO PARA OBTER TIMEFRAME PARA ATR BASEADO NO MODO ==========
+function getATRTimeframeByMode(mode) {
+  const modeATRMap = {
+    'SNIPER': 'M1',
+    'CAÇADOR': 'M5',
+    'PESCADOR': 'M15'
+  };
+  return modeATRMap[mode] || 'M5'; // fallback para M5
+}
+
 // ========== CONFIGURAÇÃO ATUALIZADA - ALINHADA COM SCRIPT.JS ==========
 const ALL_TIMEFRAMES_CONFIG = {
   'M1': { key: 'M1', seconds: 60, candleCount: 400, minRequired: 50 },
@@ -730,9 +740,59 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
     }
 
-    // Armazenar candles históricos para o TraderBotAnalise
+    // ========== COLETAR CANDLES PARA ANÁLISE REFINADA POR MODO ==========
     let historicalCandles = null;
+    const atrTimeframe = getATRTimeframeByMode(mode);
 
+    console.log(`📊 Modo ${mode} - usando ${atrTimeframe} para cálculo de ATR/volatilidade`);
+
+    // Primeiro, tentar buscar o timeframe específico para ATR
+    try {
+      const tfForATR = ALL_TIMEFRAMES_CONFIG[atrTimeframe];
+      if (tfForATR) {
+        console.log(`🔍 Buscando candles do ${atrTimeframe} para ATR...`);
+        const atrCandles = await getCandlesWithCache(client, symbol, tfForATR, true);
+        if (atrCandles && Array.isArray(atrCandles) && atrCandles.length > 0) {
+          historicalCandles = atrCandles;
+          console.log(`✅ Obtidos ${historicalCandles.length} candles do ${atrTimeframe} para ATR`);
+        } else {
+          console.log(`⚠️ Não foi possível obter candles do ${atrTimeframe}, tentando fallback...`);
+        }
+      }
+    } catch (err) {
+      console.error(`❌ Erro ao buscar ${atrTimeframe}: ${err.message}`);
+    }
+
+    // Fallback: se não conseguiu, tenta o próximo timeframe mais granular
+    if (!historicalCandles || historicalCandles.length === 0) {
+      const fallbackMap = {
+        'M1': ['M5', 'M15'],      // Sniper fallback: M5, M15
+        'M5': ['M1', 'M15'],      // Caçador fallback: M1, M15
+        'M15': ['M5', 'H1']       // Pescador fallback: M5, H1
+      };
+      
+      const fallbacks = fallbackMap[atrTimeframe] || ['M5', 'M15'];
+      
+      for (const fallbackTf of fallbacks) {
+        if (historicalCandles && historicalCandles.length > 0) break;
+        
+        try {
+          const tfConfig = ALL_TIMEFRAMES_CONFIG[fallbackTf];
+          if (tfConfig) {
+            console.log(`🔄 Fallback: tentando ${fallbackTf} para ATR...`);
+            const fallbackCandles = await getCandlesWithCache(client, symbol, tfConfig, true);
+            if (fallbackCandles && Array.isArray(fallbackCandles) && fallbackCandles.length > 0) {
+              historicalCandles = fallbackCandles;
+              console.log(`✅ Fallback: usando ${fallbackTf} para ATR (${historicalCandles.length} candles)`);
+            }
+          }
+        } catch (err) {
+          console.error(`❌ Erro no fallback ${fallbackTf}: ${err.message}`);
+        }
+      }
+    }
+
+    // Agora, processar todos os timeframes do modo normalmente
     for (const tf of timeframesToAnalyze) {
       try {
         console.log(`🔍 Analisando ${tf.key}...`);
@@ -744,11 +804,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         if (!Array.isArray(candles)) {
           console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
           continue;
-        }
-        
-        // Guardar candles do M1 para usar no cálculo de ATR
-        if (tf.key === 'M1' && candles && candles.length > 0) {
-          historicalCandles = candles;
         }
         
         if (candles.length < tf.minRequired) {
@@ -862,7 +917,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         ativo: symbol,
         precoAtual: currentPrice,
         volume: 0, // Volume não está disponível via API da Deriv
-        precosHistoricos: historicalCandles || [], // Usar candles do M1 para ATR
+        precosHistoricos: historicalCandles || [], // Usar candles do timeframe específico do modo
         timeframes: {}
       };
 
@@ -1004,6 +1059,7 @@ const server = app.listen(PORT, async () => {
   console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📊 Configuração de candles: 400 para todos os timeframes (igual ao script.js)`);
   console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança`);
+  console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
   
   try {
     console.log('🔄 Iniciando conexão persistente com a Deriv...');
