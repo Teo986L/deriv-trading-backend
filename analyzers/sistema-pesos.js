@@ -14,67 +14,72 @@ class SistemaPesosAutomaticos {
     }
 
     gerarPesosPorAtivo() {
-        const base = {
-            peso_macd: 15,
-            peso_macd_histograma: 25,
-            peso_macd_tendencia: 20,
-            adx_lateral: 10,
-            adx_fraca: 15,
-            adx_moderada: 25,
-            adx_forte: 35,
-            peso_adx_fraco: -5,
-            peso_adx_moderado: 5,
-            peso_adx_forte: 10,
-            rsi_oversold: 20,
-            rsi_overbought: 80,
-            peso_m1: 3,
-            peso_m5: 8,
-            peso_m15: 12,
+    const base = {
+        peso_macd: 15,
+        peso_macd_histograma: 25,
+        peso_macd_tendencia: 20,
+        adx_lateral: 10,
+        adx_fraca: 15,
+        adx_moderada: 25,
+        adx_forte: 35,
+        peso_adx_fraco: -5,
+        peso_adx_moderado: 5,
+        peso_adx_forte: 10,
+        rsi_oversold: 20,
+        rsi_overbought: 80,
+        peso_m1: 3,
+        peso_m5: 8,
+        peso_m15: 12,
+        peso_m30: 15,
+        peso_h1: 18,
+        peso_h4: 22,
+        peso_h24: 25,
+        sensibilidade_geral: 1.3,
+        agressividade_ajustada: 1.2,
+        ignorar_adx_abaixo: 25,
+        forcar_macd_acima: 0.002
+    };
+
+    if (this.tipoAtivo === 'volatility_index') {
+        return {
+            ...base,
+            peso_m1: 8,
+            peso_m5: 12,
+            peso_m15: 15,
             peso_m30: 15,
             peso_h1: 18,
-            peso_h4: 22,
-            peso_h24: 25,
-            sensibilidade_geral: 1.3,
-            agressividade_ajustada: 1.2,
-            ignorar_adx_abaixo: 25,
-            forcar_macd_acima: 0.002
+            peso_h4: 20,
+            peso_h24: 22,
+            ignorar_adx_abaixo: 15,        // 🔥 ANTES 18, AGORA 15
+            sensibilidade_geral: 1.5,
+            agressividade_ajustada: 1.4,
+            rsi_oversold: 25,
+            rsi_overbought: 75,
+            // 🔥 NOVOS AJUSTES PARA VOLATILITY
+            adx_moderada: 20,              // antes 25
+            adx_forte: 30,                 // antes 35
+            peso_adx_moderado: 8,          // antes 5
+            peso_adx_forte: 15             // antes 10
         };
-
-        if (this.tipoAtivo === 'volatility_index') {
-            return {
-                ...base,
-                peso_m1: 8,
-                peso_m5: 12,
-                peso_m15: 15,
-                peso_m30: 15,
-                peso_h1: 18,
-                peso_h4: 20,
-                peso_h24: 22,
-                ignorar_adx_abaixo: 18,
-                sensibilidade_geral: 1.5,
-                agressividade_ajustada: 1.4,
-                rsi_oversold: 25,
-                rsi_overbought: 75
-            };
-        }
-        
-        if (this.tipoAtivo === 'forex') {
-            return {
-                ...base,
-                peso_m1: 2,
-                peso_m5: 5,
-                peso_m15: 10,
-                peso_m30: 15,
-                peso_h1: 20,
-                peso_h4: 25,
-                peso_h24: 30,
-                ignorar_adx_abaixo: 20,
-                sensibilidade_geral: 1.1
-            };
-        }
-
-        return base;
     }
+    
+    if (this.tipoAtivo === 'forex') {
+        return {
+            ...base,
+            peso_m1: 2,
+            peso_m5: 5,
+            peso_m15: 10,
+            peso_m30: 15,
+            peso_h1: 20,
+            peso_h4: 25,
+            peso_h24: 30,
+            ignorar_adx_abaixo: 20,
+            sensibilidade_geral: 1.1
+        };
+    }
+
+    return base;
+}
 
     gerarPesosPadrao() {
         if (this.tipoAtivo) {
