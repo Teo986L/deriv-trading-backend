@@ -12,23 +12,33 @@ module.exports = {
         MACD_SIGNAL: 9
     },
 
-    // 🔥 Modos de trading com thresholds específicos
+    // 🔥 CONFIGURAÇÃO GLOBAL DE ADX (NOVO)
+    ADX_CONFIG: {
+        TREND_STRONG: 22,      // antes 25
+        TREND_WEAK: 18,        // antes 20  
+        NO_TREND: 15,
+        SNIPER_MIN: 20,
+        HUNTER_MIN: 18,
+        FISHER_MIN: 15
+    },
+
+    // 🔥 Modos de trading com thresholds ajustados
     TRADING_MODES: {
         SNIPER: {
             name: 'SNIPER',
-            minConfidence: 0.60,
+            minConfidence: 0.55,        // antes 0.60
             description: 'Entradas cirúrgicas de 1-15 minutos',
             timeframes: ['M1', 'M5', 'M15']
         },
         HUNTER: {
             name: 'CAÇADOR',
-            minConfidence: 0.50,
+            minConfidence: 0.45,        // antes 0.50
             description: 'Ondas médias de 15-60 minutos',
             timeframes: ['M5', 'M15', 'H1']
         },
         FISHER: {
             name: 'PESCADOR',
-            minConfidence: 0.40,
+            minConfidence: 0.35,        // antes 0.40
             description: 'Grandes movimentos de horas a dias',
             timeframes: ['M15', 'H1', 'H4']
         }
@@ -37,11 +47,11 @@ module.exports = {
     // 🔥 Modo de trading ativo
     TRADING_MODE: "PADRÃO",
 
-    // 🔥 Thresholds ajustados para melhor performance
-    PROB_BUY_THRESHOLD: 0.55,
-    PROB_SELL_THRESHOLD: 0.45,
-    MIN_CALL_CONFIRMATIONS: 3,
-    MIN_PUT_CONFIRMATIONS: 3,
+    // 🔥 Thresholds ajustados
+    PROB_BUY_THRESHOLD: 0.52,           // antes 0.55
+    PROB_SELL_THRESHOLD: 0.48,          // antes 0.45
+    MIN_CALL_CONFIRMATIONS: 2,          // antes 3
+    MIN_PUT_CONFIRMATIONS: 2,           // antes 3
 
     TIMEFRAMES: {
         M1: 60,
@@ -54,7 +64,7 @@ module.exports = {
     },
 
     BOT_SHIELD_CONFIG: {
-        MIN_CONFIDENCE: 65,
+        MIN_CONFIDENCE: 55,              // 🔥 ANTES 65, AGORA 55
         USE_CLOSED_CANDLES_ONLY: true,
         ELLIOTT_WEIGHT_REDUCTION: 0.3,
         MAX_ALLOWED_DELAY_MS: 30000,
