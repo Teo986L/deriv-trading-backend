@@ -710,7 +710,7 @@ class MultiTimeframeManager {
         }
     }
 
-    // ========== CALCULAR PESO DINÂMICO ==========
+    // ========== CALCULAR PESO DINÂMICO (MODIFICADO PARA VOLATILITY) ==========
     calcularPesoDinamico(timeframeKey, analysis) {
         const pesoBase = this.TF_BASE_WEIGHT[timeframeKey] || 1.0;
         const pesoEspecial = this.calcularPesoEspecial(timeframeKey);
@@ -720,10 +720,47 @@ class MultiTimeframeManager {
         const taxaAcerto = historico.total > 0 ? historico.acertos / historico.total : 0.5;
         const pesoPorAcerto = 0.5 + (taxaAcerto * 0.5);
         
-        // Ajustar baseado no ADX
-        const pesoADX = analysis.adx > 30 ? 1.2 : analysis.adx > 20 ? 1.0 : 0.6;
+        // 🔥 AJUSTADO: pesoADX mais suave para Volatility Index
+        let pesoADX;
+        const isVolatility = this.simbolo && this.simbolo.startsWith('R_');
+        
+        if (isVolatility) {
+            // Volatility Index: limiares mais baixos (ADX 19.2 → peso 1.0)
+            pesoADX = analysis.adx > 22 ? 1.2 : analysis.adx > 14 ? 1.0 : 0.7;
+        } else {
+            // Outros ativos: padrão original
+            pesoADX = analysis.adx > 30 ? 1.2 : analysis.adx > 20 ? 1.0 : 0.6;
+        }
         
         return pesoBase * pesoEspecial * pesoPorAcerto * pesoADX;
+    }
+
+    // ========== CALCULAR VOLATILITY BOOST (NOVO MÉTODO) ==========
+    calcularVolatilityBoost() {
+        // Só aplica para Volatility Index
+        if (!this.simbolo?.startsWith('R_')) return 1.0;
+        
+        // Calcular ADX médio de todos os timeframes
+        const adxValues = Object.values(this.allAnalyses)
+            .filter(a => a && a.adx && typeof a.adx === 'number')
+            .map(a => a.adx);
+        
+        if (adxValues.length === 0) return 1.0;
+        
+        const adxMedio = adxValues.reduce((sum, a) => sum + a, 0) / adxValues.length;
+        
+        // Boost quando ADX médio está em zona de tendência moderada
+        if (adxMedio > 20 && adxMedio < 30) {
+            console.log(`📈 Volatility Boost: ADX médio ${adxMedio.toFixed(1)} → +15% confiança`);
+            return 1.15;
+        }
+        
+        if (adxMedio >= 30) {
+            console.log(`📈 Volatility Boost: ADX médio ${adxMedio.toFixed(1)} → +10% confiança`);
+            return 1.10;
+        }
+        
+        return 1.0;
     }
 
     addAnalysis(timeframeKey, analysis) {
@@ -1053,6 +1090,11 @@ class MultiTimeframeManager {
 
         const majorityRatio = Math.max(callCount, putCount) / (callCount + putCount + holdCount);
         confidence = confidence * (0.8 + 0.2 * majorityRatio);
+        
+        // 🔥 APLICAR VOLATILITY BOOST
+        const volatilityBoost = this.calcularVolatilityBoost();
+        confidence = confidence * volatilityBoost;
+        
         confidence = Math.min(0.95, Math.max(0.05, confidence));
 
         // ========== ADICIONAR INFORMAÇÕES ESPECIAIS AO RESULTADO ==========
