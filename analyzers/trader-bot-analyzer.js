@@ -48,7 +48,7 @@ class TraderBotAnalise {
                 maxVolatilidade: 1.2               // Sniper prefere volatilidade moderada
             },
             CACADOR: {
-                nome: "CAÇADOR",
+                nome: "CACADOR",
                 timeframes: ["M5", "M15", "H1"],
                 descricao: "Médio prazo - tendência confirmada",
                 pesoTimeframes: [0.4, 0.35, 0.25], // H1 tem peso maior
