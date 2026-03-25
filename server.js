@@ -76,7 +76,7 @@ const TRADING_MODES = {
     timeframes: ['M1', 'M5', 'M15'],
     description: 'Entradas cirúrgicas de 1-15 minutos'
   },
-  'CACADOR': {
+  'CAÇADOR': {
     timeframes: ['M5', 'M15', 'H1'],
     description: 'Ondas médias de 15-60 minutos'
   },
