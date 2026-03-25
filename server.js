@@ -297,10 +297,18 @@ async function getCurrentPrice(client, symbol) {
     };
     
     client.addListener(reqId, handler);
-    client.send({ tick: symbol, req_id: reqId });
+    
+    // 🔥 CORREÇÃO: usa o WebSocket diretamente
+    if (client.ws && client.ws.readyState === client.ws.OPEN) {
+      client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
+    } else {
+      console.log(`⚠️ WebSocket não conectado para tick de ${symbol}`);
+      clearTimeout(timeout);
+      client.removeListener(reqId);
+      resolve(null);
+    }
   });
 }
-
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
 });
