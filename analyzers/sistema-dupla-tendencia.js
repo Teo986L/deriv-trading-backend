@@ -280,27 +280,36 @@ class SistemaDuplaTendencia {
         
         const { convergencia } = analiseDupla;
         
-        // 🔥 CORREÇÃO: Nunca retornar HOLD se houver uma direção clara
+        // 🔍 LOG: Mostrar o que entrou
+        console.log(`🔍 [DUPLA] sinalFinal original: ${convergencia.sinalFinal}, adx: ${analiseDupla.adx}`);
+        console.log(`   tendenciaCurtoPrazo: ${analiseDupla.tendenciaCurtoPrazo?.sinal} (conf: ${analiseDupla.tendenciaCurtoPrazo?.confiabilidade?.toFixed(2)})`);
+        console.log(`   tendenciaMedioPrazo: ${analiseDupla.tendenciaMedioPrazo?.sinal} (conf: ${analiseDupla.tendenciaMedioPrazo?.confiabilidade?.toFixed(2)})`);
+        
         let sinal = convergencia.sinalFinal;
         let probabilidade = convergencia.probabilidade;
         
         // Se o sinal for HOLD mas há ADX forte, usar a tendência predominante
         if (sinal === 'HOLD' && analiseDupla.adx > 25) {
-            // Usar a tendência com maior confiabilidade
+            console.log(`⚠️ [DUPLA] Sinal HOLD com ADX forte (${analiseDupla.adx.toFixed(1)}) - escolhendo nova direção`);
             if (analiseDupla.tendenciaCurtoPrazo.confiabilidade > analiseDupla.tendenciaMedioPrazo.confiabilidade) {
                 sinal = analiseDupla.tendenciaCurtoPrazo.sinal;
                 probabilidade = 0.55;
+                console.log(`   → Escolheu tendenciaCurtoPrazo: ${sinal}`);
             } else {
                 sinal = analiseDupla.tendenciaMedioPrazo.sinal;
                 probabilidade = 0.55;
+                console.log(`   → Escolheu tendenciaMedioPrazo: ${sinal}`);
             }
             
             // Se ainda assim for HOLD, usar o RSI
             if (sinal === 'HOLD') {
                 sinal = analiseDupla.rsi > 50 ? 'CALL' : 'PUT';
+                console.log(`   → Ainda HOLD, usou RSI (${analiseDupla.rsi.toFixed(1)}): ${sinal}`);
                 probabilidade = 0.5;
             }
         }
+        
+        console.log(`🔍 [DUPLA] sinalFinal final: ${sinal} | probabilidade: ${probabilidade.toFixed(2)}`);
         
         return {
             sinal: sinal,
