@@ -624,12 +624,33 @@ permitido: false,
 motivo: 'M15 não disponível',
 rsi: m15Analysis?.rsi || null,
 sinal: m15Analysis?.sinal || null,
-adx: m15Analysis?.adx || null
+adx: m15Analysis?.adx || null,
+alerta_pullback: null
 };
 }
 
 const adx = m15Analysis.adx || 0;
+const rsi = m15Analysis.rsi || 50;
 const temTendenciaForte = adx >= 25;
+
+// 🔥 NOVO: ALERTA DE PULLBACK (RSI extremo)
+let alertaPullback = null;
+if (primarySignal === 'PUT' && rsi < 35) {
+alertaPullback = {
+tipo: 'PULLBACK_IMINENTE',
+mensagem: `⚠️ RSI M15 em ${rsi.toFixed(0)} (sobrevenda) - Pullback iminente! Aguarde retomada da queda.`,
+acao: 'AGUARDAR_RETOMADA',
+nivel: 'ALERTA'
+};
+}
+if (primarySignal === 'CALL' && rsi > 65) {
+alertaPullback = {
+tipo: 'PULLBACK_IMINENTE',
+mensagem: `⚠️ RSI M15 em ${rsi.toFixed(0)} (sobrecompra) - Pullback iminente! Aguarde retomada da alta.`,
+acao: 'AGUARDAR_RETOMADA',
+nivel: 'ALERTA'
+};
+}
 
 if (primarySignal === 'CALL') {
 if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi < 65 && temTendenciaForte) {
@@ -638,7 +659,8 @@ permitido: true,
 motivo: `M15 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 else if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi < 65) {
@@ -647,7 +669,8 @@ permitido: true,
 motivo: `M15 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 else if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi < 30) {
@@ -656,7 +679,8 @@ permitido: true,
 motivo: `M15 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 else {
@@ -665,7 +689,8 @@ permitido: false,
 motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${m15Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 }
@@ -676,7 +701,8 @@ permitido: true,
 motivo: `M15 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 else if (m15Analysis.sinal === 'PUT' && m15Analysis.rsi > 35) {
@@ -685,7 +711,8 @@ permitido: true,
 motivo: `M15 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 else if (m15Analysis.sinal === 'CALL' && m15Analysis.rsi > 70) {
@@ -694,7 +721,8 @@ permitido: true,
 motivo: `M15 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 else {
@@ -703,7 +731,8 @@ permitido: false,
 motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${m15Analysis.rsi?.toFixed(0)}, ADX ${adx.toFixed(0)})`,
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 }
@@ -713,7 +742,8 @@ permitido: false,
 motivo: 'Sinal principal neutro',
 rsi: m15Analysis.rsi,
 sinal: m15Analysis.sinal,
-adx: adx
+adx: adx,
+alerta_pullback: alertaPullback
 };
 }
 
