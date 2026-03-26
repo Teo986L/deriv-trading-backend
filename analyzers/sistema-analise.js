@@ -245,7 +245,7 @@ class SistemaAnaliseInteligente {
         this.advancedAnalyzer = new AdvancedMarketAnalyzer();
         this.velocidadeAnalyzer = new AnaliseVelocidadeIndicadores();
         this.zonaDeOuroPremium = new ZonaDeOuroPremium();
-        this.macdPhaseAnalyzer = new MacdPhaseAnalyzer(); // NOVO: Analisador de fases MACD
+        this.macdPhaseAnalyzer = new MacdPhaseAnalyzer();
         
         this.multiTimeframeManager = new MultiTimeframeManager();
         this.timeframesData = {};
@@ -531,7 +531,7 @@ class SistemaAnaliseInteligente {
             tendencia: tendenciaMACD,
             velocidade_analysis: velocidadeAnalysis,
             macd: macdResult,
-            macd_phase: macdPhase, // NOVO: adicionar fase MACD
+            macd_phase: macdPhase,
             elliott: elliottAnalysis.structure,
             quasimodo: confirmacaoQM,
             dupla_tendencia: {
@@ -544,115 +544,24 @@ class SistemaAnaliseInteligente {
         
         this.multiTimeframeManager.addAnalysis(timeframeKey, analiseAtual);
 
-        const consolidated = this.multiTimeframeManager.consolidateSignals();
+        // 🔥 REMOVIDO: consolidateSignals() NÃO deve ser chamado aqui
+        // const consolidated = this.multiTimeframeManager.consolidateSignals();
         
-        const velocidades = this.coletarAnalisesVelocidade(this.multiTimeframeManager.allAnalyses);
-        const comparacaoVelocidade = this.velocidadeAnalyzer.compararVelocidadeEntreTimeframes(velocidades);
+        // 🔥 REMOVIDO: coletarAnalisesVelocidade também não deve ser usado aqui
+        // const velocidades = this.coletarAnalisesVelocidade(this.multiTimeframeManager.allAnalyses);
+        // const comparacaoVelocidade = this.velocidadeAnalyzer.compararVelocidadeEntreTimeframes(velocidades);
 
-        let sinal = consolidated.signal;
-        let probabilidade = consolidated.confidence;
-        let regra = `Sinal consolidado por ADX (timeframe dominante: ${consolidated.timeframeDominante?.tf || 'N/A'})`;
-        let explicacoes = [regra];
-
-        // ========== APLICAR FILTRO DE DIVERGÊNCIA MACD ==========
-        if (divergenciaMACD.divergencia) {
-            probabilidade *= divergenciaMACD.probabilidadeReducao;
-            explicacoes.push(`🚨 ${divergenciaMACD.tipo}: ${divergenciaMACD.motivo} (fator ${divergenciaMACD.probabilidadeReducao})`);
-        }
-
-        // ========== APLICAR MULTIPLICADOR DA FASE MACD ==========
-        const phaseMultiplier = macdPhase.multiplier;
-        probabilidade *= phaseMultiplier;
-        explicacoes.push(`📊 Fase MACD: ${macdPhase.name} (x${phaseMultiplier.toFixed(2)})`);
-
-        // ========== VERIFICAR SE A FASE PERMITE TRADING ==========
-        if (!this.macdPhaseAnalyzer.shouldTrade(macdPhase.phase)) {
-            probabilidade *= 0.5;
-            explicacoes.push('⚠️ Fase MACD não recomendada para trading');
-        }
-
-        if (advancedAnalysis && advancedAnalysis.summary) {
-            const adv = advancedAnalysis.summary;
-            if (!adv.tradeAllowed) {
-                probabilidade *= 0.3;
-                explicacoes.push(`🚫 Análise avançada bloqueia: ${adv.reason}`);
-            } else if (adv.state === MARKET_STATE.STRONG_BULL_TREND || 
-                       adv.state === MARKET_STATE.STRONG_BEAR_TREND) {
-                probabilidade += 0.1;
-                explicacoes.push(`📈 Estado de tendência forte (${adv.state})`);
-            }
-        }
-
-        if (confirmacaoQM.confirmed && confirmacaoQM.pattern) {
-            probabilidade += 0.07;
-            explicacoes.push("✅ Confirmado por Quasimodo");
-        }
-
-        const elliottConfirma = elliottAnalysis.tradingSignals.some(
-            s => (s.type === 'BUY' && sinal === 'CALL') || 
-                 (s.type === 'SELL' && sinal === 'PUT')
-        );
-        
-        if (elliottConfirma) {
-            probabilidade += 0.08;
-            explicacoes.push("🌊 Confirmado por Elliott Wave");
-        }
-
-        if (velocidadeAnalysis && velocidadeAnalysis.fatorConfianca < 0.6) {
-            probabilidade *= velocidadeAnalysis.fatorConfianca;
-            explicacoes.push(`⏱️ Velocidade anormal (fator ${velocidadeAnalysis.fatorConfianca.toFixed(2)})`);
-        }
-
-        if (comparacaoVelocidade.score < 50) {
-            probabilidade *= 0.7;
-            explicacoes.push(`⚠️ Divergência de velocidade entre TFs (score: ${comparacaoVelocidade.score}%)`);
-        }
-
-        if (volatilidadeAtual > 2.0) {
-            probabilidade *= 0.9;
-            explicacoes.push("📊 Alta volatilidade");
-        } else if (volatilidadeAtual < 0.3) {
-            probabilidade *= 1.1;
-            explicacoes.push("📊 Baixa volatilidade");
-        }
-
-        const analiseConfiabilidade = this.sistemaConfiabilidade.analisarConfiabilidadeSinal(sinal, {
-            precoAtual,
-            macdHistograma: macdResult.histograma,
-            rsi,
-            candles,
-            timeframe: timeframeKey
-        });
-
-        if (!analiseConfiabilidade.confiavel && sinal !== "HOLD") {
-            probabilidade *= 0.7;
-            explicacoes.push("⚠️ Confiabilidade baixa");
-        }
-
-        probabilidade = Math.max(0.3, Math.min(0.92, probabilidade));
-        probabilidade = this.aplicarFiltroTradingMode(sinal, probabilidade);
-        probabilidade = Math.max(0.35, Math.min(0.92, probabilidade));
-
-        const direcao = sinal === "CALL" ? "ALTA" : sinal === "PUT" ? "BAIXA" : "NEUTRA";
-
-        this.updateTimeframeData(timeframeKey, {
-            sinal,
-            probabilidade,
-            adx: adxData.adx,
-            rsi,
-            preco_atual: precoAtual
-        });
-
+        // 🔥 AGORA retornamos apenas a análise individual, sem consolidação
         const resultado = {
-            sinal,
-            direcao,
-            probabilidade,
+            sinal: sinalDupla.sinal,
+            direcao: sinalDupla.sinal === "CALL" ? "ALTA" : sinalDupla.sinal === "PUT" ? "BAIXA" : "NEUTRA",
+            probabilidade: sinalDupla.probabilidade,
             tendencia: tendenciaMACD,
             rsi,
             adx: adxData.adx,
             preco_atual: precoAtual,
             variacao_recente: ((precoAtual - precoAnterior) / precoAnterior * 100),
-            regra_aplicada: explicacoes.join(' | '),
+            regra_aplicada: `Análise individual ${timeframeKey}`,
             volatilidade: volatilidadeAtual,
             tipo_ativo: this.tipoAtivo,
             simbolo: this.simbolo,
@@ -660,10 +569,10 @@ class SistemaAnaliseInteligente {
             
             tendencias_duplas: analiseDupla,
             confiabilidade: {
-                confiavel: analiseConfiabilidade.confiavel,
-                categoria: analiseConfiabilidade.categoria,
-                acao_recomendada: analiseConfiabilidade.acaoRecomendada,
-                motivo: analiseConfiabilidade.motivo
+                confiavel: true,
+                categoria: "ANALISE_INDIVIDUAL",
+                acao_recomendada: sinalDupla.sinal === 'HOLD' ? 'AGUARDAR' : `${sinalDupla.sinal}`,
+                motivo: `Análise individual do ${timeframeKey}`
             },
             quasimodo_confirmation: {
                 confirmed: confirmacaoQM.confirmed,
@@ -707,14 +616,6 @@ class SistemaAnaliseInteligente {
                 raw: macdPhase.raw
             },
             
-            multi_timeframe: this.multiTimeframeManager.getDiagnostico ? 
-                this.multiTimeframeManager.getDiagnostico() : {
-                    consolidado: consolidated,
-                    comparacao_velocidade: comparacaoVelocidade,
-                    timeframe_dominante: consolidated.timeframeDominante,
-                    divergencias: consolidated.divergencias || []
-                },
-            
             indicator_config: {
                 rsi_period: INDICATOR_CONFIG.RSI_PERIOD,
                 adx_period: INDICATOR_CONFIG.ADX_PERIOD,
@@ -736,13 +637,10 @@ class SistemaAnaliseInteligente {
                 candles: candles,
                 rsi: rsi,
                 adx: adxData.adx
-            }, probabilidade * 100);
+            }, sinalDupla.probabilidade * 100);
 
             if (sniperResult) {
                 resultado.institutional_sniper = sniperResult;
-                if (sniperResult.confidence >= 80 && sniperResult.signal === sinal) {
-                    resultado.regra_aplicada += ` | 🎯 INSTITUTIONAL SNIPER CONFIRMA (${sniperResult.rating})`;
-                }
             }
         }
 
