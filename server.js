@@ -1009,6 +1009,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       }
     });
 
+    // 🔍 LOG DE DIAGNÓSTICO: Verificar sinais antes de enviar resposta
+    console.log('🔍 [SERVER] allAnalyses FINAL antes da resposta:');
+    for (const [key, analysis] of Object.entries(mtfManager.allAnalyses)) {
+      console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+    }
+
     const responseTime = Date.now() - startTime;
     
     const response = {
