@@ -617,6 +617,15 @@ adx: adx
 };
 }
 
+// ========== LIMITES DE RSI POR TIPO DE ATIVO ==========
+const RSI_LIMITS_BY_ASSET = {
+  'forex': { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 30, descricao: 'Forex' },
+  'volatility_index': { pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20, descricao: 'Volatility' },
+  'commodity': { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Commodity' },
+  'criptomoeda': { pullback: 30, extremo: 25, sobrecompra: 80, sobrevenda: 20, descricao: 'Criptomoeda' },
+  'indice_normal': { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Índice Normal' }
+};
+
 function calcularTimingM15(m15Analysis, primarySignal) {
 if (!m15Analysis || primarySignal === 'HOLD') {
 return {
@@ -633,22 +642,32 @@ const adx = m15Analysis.adx || 0;
 const rsi = m15Analysis.rsi || 50;
 const temTendenciaForte = adx >= 25;
 
-// 🔥 NOVO: ALERTA DE PULLBACK (RSI extremo)
+// 🔥 DETECTAR TIPO DE ATIVO (vem do backend)
+const tipoAtivo = m15Analysis.tipo_ativo || 'indice_normal';
+const limite = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
+
+// 🔥 ALERTA DE PULLBACK (usando limites por tipo de ativo)
 let alertaPullback = null;
-if (primarySignal === 'PUT' && rsi < 35) {
+if (primarySignal === 'PUT' && rsi < limite.pullback) {
+const nivelAlerta = rsi < limite.extremo ? 'EXTREMO' : 'ALERTA';
 alertaPullback = {
 tipo: 'PULLBACK_IMINENTE',
-mensagem: `⚠️ RSI M15 em ${rsi.toFixed(0)} (sobrevenda) - Pullback iminente! Aguarde retomada da queda.`,
+mensagem: `⚠️ RSI M15 em ${rsi.toFixed(0)} (sobrevenda ${limite.descricao}) - Pullback iminente! Aguarde retomada da queda.`,
 acao: 'AGUARDAR_RETOMADA',
-nivel: 'ALERTA'
+nivel: nivelAlerta,
+tipo_ativo: tipoAtivo,
+limite_pullback: limite.pullback
 };
 }
-if (primarySignal === 'CALL' && rsi > 65) {
+if (primarySignal === 'CALL' && rsi > limite.sobrecompra) {
+const nivelAlerta = rsi > (100 - limite.extremo) ? 'EXTREMO' : 'ALERTA';
 alertaPullback = {
 tipo: 'PULLBACK_IMINENTE',
-mensagem: `⚠️ RSI M15 em ${rsi.toFixed(0)} (sobrecompra) - Pullback iminente! Aguarde retomada da alta.`,
+mensagem: `⚠️ RSI M15 em ${rsi.toFixed(0)} (sobrecompra ${limite.descricao}) - Pullback iminente! Aguarde retomada da alta.`,
 acao: 'AGUARDAR_RETOMADA',
-nivel: 'ALERTA'
+nivel: nivelAlerta,
+tipo_ativo: tipoAtivo,
+limite_sobrecompra: limite.sobrecompra
 };
 }
 
