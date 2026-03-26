@@ -897,6 +897,28 @@ console.error(`❌ Erro ao buscar/analisar ${tf.key}:`, err.message);
 const consolidated = mtfManager.consolidateSignals();
 const agreement = mtfManager.calculateAgreement();
 
+// ========== BLOQUEIO POR DIVERGÊNCIA DE TIMEFRAMES ==========
+// Verifica se há divergência entre os timeframes do modo atual
+const timeframesSignals = [];
+for (const tfKey of TRADING_MODES[mode].timeframes) {
+    const analysis = mtfManager.timeframes[tfKey]?.analysis;
+    if (analysis && analysis.sinal && analysis.sinal !== 'HOLD') {
+        timeframesSignals.push(analysis.sinal);
+    }
+}
+
+const callCountDiv = timeframesSignals.filter(s => s === 'CALL').length;
+const putCountDiv = timeframesSignals.filter(s => s === 'PUT').length;
+
+// Se houver pelo menos um de cada lado (divergência)
+if (callCountDiv > 0 && putCountDiv > 0) {
+    console.log(`⚠️ Divergência de timeframes detectada: ${callCountDiv} CALL vs ${putCountDiv} PUT - forçando HOLD`);
+    consolidated.simpleMajority.signal = "HOLD";
+    consolidated.signal = "HOLD";
+    consolidated.confidence = Math.min(consolidated.confidence, 0.3);
+}
+// =================================================
+
 // ========== BLOQUEIO POR DIVERGÊNCIA MACD ==========
 // Verifica qualquer timeframe do modo atual
 let hasMacdDivergence = false;
