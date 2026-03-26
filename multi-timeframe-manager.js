@@ -954,6 +954,12 @@ class MultiTimeframeManager {
     }
 
     consolidateSignals() {
+        // 🔍 LOG: Sinais ANTES de qualquer modificação
+        console.log('🔍 [CONSOLIDATE] ANTES de qualquer modificação:');
+        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
+            console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+        }
+        
         let totalWeight = 0;
         let callWeight = 0;
         let putWeight = 0;
@@ -968,6 +974,12 @@ class MultiTimeframeManager {
         const cicloCompleto = this.detectarCicloCompleto();
         const pontoFranco = this.detectarPontoFranco();
         const alinhamentoPescador = this.detectarAlinhamentoPescador();
+
+        // 🔍 LOG: Após detectar informações especiais
+        console.log('🔍 [CONSOLIDATE] Após detectar informações especiais:');
+        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
+            console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+        }
 
         // Se for tendência real, logar
         if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
@@ -1033,6 +1045,12 @@ class MultiTimeframeManager {
             };
         }
 
+        // 🔍 LOG: Após o loop de processamento
+        console.log('🔍 [CONSOLIDATE] Após loop de processamento (antes de calcular primarySignal):');
+        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
+            console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+        }
+
         if (totalWeight === 0 && timeframesCount > 0) {
             console.warn("⚠️ Nenhum timeframe com ADX suficiente - usando o melhor disponível");
             return this.consolidateSignalsFallback();
@@ -1096,6 +1114,12 @@ class MultiTimeframeManager {
         confidence = confidence * volatilityBoost;
         
         confidence = Math.min(0.95, Math.max(0.05, confidence));
+
+        // 🔍 LOG: Antes do return
+        console.log('🔍 [CONSOLIDATE] ANTES DO RETURN (estado final):');
+        for (const [key, analysis] of Object.entries(this.allAnalyses)) {
+            console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+        }
 
         // ========== ADICIONAR INFORMAÇÕES ESPECIAIS AO RESULTADO ==========
         this.consolidatedSignal = {
