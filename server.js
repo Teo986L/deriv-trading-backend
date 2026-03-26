@@ -60,6 +60,12 @@ const TTL_BY_MODE = {
   'PESCADOR': 900    // 15 minutos (M15)
 };
 
+// ========== MAPEAMENTO DE TIMEFRAME PARA AGREGAÇÃO ==========
+const AGGREGATION_CONFIG = {
+  'H4': { base: 'H1', multiplier: 4 },   // 4 candles de H1 = 1 H4
+  'H24': { base: 'H1', multiplier: 24 }  // 24 candles de H1 = 1 H24
+};
+
 // ========== FUNÇÃO PARA OBTER TTL BASEADO NO MODO ==========
 function getTTLByMode(mode, timeframeKey) {
   const baseTTL = TTL_BY_MODE[mode] || 300;
@@ -133,7 +139,55 @@ function isCandleClosed(candle, timeframeSeconds) {
   return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
 }
 
+// ========== FUNÇÃO PARA AGREGAR CANDLES ==========
+function aggregateCandles(candles, multiplier) {
+  const aggregated = [];
+  for (let i = 0; i < candles.length; i += multiplier) {
+    const group = candles.slice(i, i + multiplier);
+    if (group.length === 0) continue;
+    
+    aggregated.push({
+      open: group[0].open,
+      high: Math.max(...group.map(c => c.high)),
+      low: Math.min(...group.map(c => c.low)),
+      close: group[group.length - 1].close,
+      epoch: group[group.length - 1].epoch,
+      time: group[group.length - 1].time
+    });
+  }
+  return aggregated;
+}
+
 async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false) {
+  // Verificar se este timeframe precisa ser agregado
+  const aggregation = AGGREGATION_CONFIG[tf.key];
+  
+  // Se for H4 ou H24, buscar candles do timeframe base (H1) e agregar
+  if (aggregation) {
+    const baseTf = ALL_TIMEFRAMES_CONFIG[aggregation.base];
+    if (!baseTf) {
+      console.error(`❌ Timeframe base ${aggregation.base} não encontrado para ${tf.key}`);
+      return [];
+    }
+    
+    console.log(`🔄 Agregando ${tf.key} a partir de ${aggregation.base} (${aggregation.multiplier}x) - modo ${mode}`);
+    
+    // Buscar candles do timeframe base
+    const baseCandles = await getCandlesWithCache(client, symbol, baseTf, mode, forceFresh);
+    
+    if (!Array.isArray(baseCandles) || baseCandles.length === 0) {
+      console.error(`❌ Não foi possível obter candles base para ${tf.key}`);
+      return [];
+    }
+    
+    // Agregar candles
+    const aggregatedCandles = aggregateCandles(baseCandles, aggregation.multiplier);
+    console.log(`📊 ${tf.key}: agregados ${aggregatedCandles.length} candles a partir de ${baseCandles.length} candles de ${aggregation.base}`);
+    
+    return aggregatedCandles;
+  }
+  
+  // Para os demais timeframes (M1, M5, M15, M30, H1), usar o cache normal
   const cacheKey = `candles:${symbol}:${tf.key}:${mode}`;
   const ttl = getTTLByMode(mode, tf.key);
   
