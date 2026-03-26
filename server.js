@@ -53,6 +53,25 @@ const TTL_BY_TIMEFRAME = {
   'H24': 300
 };
 
+// ========== CONFIGURAÇÃO DE TTL POR MODO ==========
+const TTL_BY_MODE = {
+  'SNIPER': 60,      // 1 minuto (M1)
+  'CAÇADOR': 300,    // 5 minutos (M5)
+  'PESCADOR': 900    // 15 minutos (M15)
+};
+
+// ========== FUNÇÃO PARA OBTER TTL BASEADO NO MODO ==========
+function getTTLByMode(mode, timeframeKey) {
+  const baseTTL = TTL_BY_MODE[mode] || 300;
+  
+  // Timeframes maiores podem ter TTL um pouco maior (opcional)
+  if (timeframeKey === 'H24') return Math.min(baseTTL * 2, 1800);
+  if (timeframeKey === 'H4') return Math.min(baseTTL * 1.5, 900);
+  if (timeframeKey === 'H1') return Math.min(baseTTL * 1.2, 600);
+  
+  return baseTTL;
+}
+
 if (process.env.REDIS_URL) {
   try {
     redisClient = createClient({ url: process.env.REDIS_URL });
@@ -114,12 +133,14 @@ function isCandleClosed(candle, timeframeSeconds) {
   return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
 }
 
-async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
+async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false) {
+  const cacheKey = `candles:${symbol}:${tf.key}:${mode}`;
+  const ttl = getTTLByMode(mode, tf.key);
+  
   // Se não tiver Redis ou forçar atualização, busca direto da Deriv
   if (!redisClient || !redisClient.isReady || forceFresh) {
-    console.log(`🔄 Buscando ${tf.key} direto da Deriv (${tf.candleCount} candles)`);
+    console.log(`🔄 Buscando ${tf.key} direto da Deriv (${tf.candleCount} candles) - modo ${mode}`);
     
-    // Pede 400 candles como no script.js original
     const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
     
     if (!Array.isArray(candles)) {
@@ -127,44 +148,42 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
       return candles;
     }
     
-    // Script.js NÃO filtra candles fechados, mas vamos manter o filtro
-    // para usar apenas candles completos (mais seguro)
-    const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
+    // NÃO filtrar candles fechados - usar todos para maior responsividade
+    console.log(`📊 ${tf.key}: recebidos ${candles.length} candles`);
     
-    console.log(`📊 ${tf.key}: recebidos ${candles.length} candles, ${closedCandles.length} fechados`);
-    
-    if (closedCandles.length < tf.minRequired) {
-      console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
-      // Ainda assim retorna os candles fechados para análise
+    if (candles.length < tf.minRequired) {
+      console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
     }
     
-    return closedCandles;
+    // Armazenar no cache se tiver Redis
+    if (redisClient && redisClient.isReady) {
+      await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
+      console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`);
+    }
+    
+    return candles;
   }
 
   // Com Redis - usar cache
-  const cacheKey = `candles:${symbol}:${tf.key}`;
-  
   try {
     const cached = await redisClient.get(cacheKey);
     
     if (cached) {
-      const ttl = await redisClient.ttl(cacheKey);
-      console.log(`✅ Cache hit: ${cacheKey} (TTL: ${ttl}s)`);
+      const remainingTTL = await redisClient.ttl(cacheKey);
+      console.log(`✅ Cache hit: ${cacheKey} (TTL restante: ${remainingTTL}s)`);
       
-      // Atualizar cache em background se estiver perto de expirar
-      if (ttl < 5) {
+      // Se TTL estiver baixo, atualizar em background
+      if (remainingTTL < 5) {
         setTimeout(async () => {
           try {
             console.log(`🔄 Atualizando cache em background: ${cacheKey}`);
             const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
             if (Array.isArray(freshCandles)) {
-              const closedCandles = freshCandles.filter(c => isCandleClosed(c, tf.seconds));
-              const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
-              await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
-              console.log(`✅ Cache atualizado: ${cacheKey} (${closedCandles.length} candles)`);
+              await redisClient.setEx(cacheKey, ttl, JSON.stringify(freshCandles));
+              console.log(`✅ Cache atualizado: ${cacheKey}`);
             }
           } catch (err) {
-            console.error(`❌ Erro atualizando cache em background: ${err.message}`);
+            console.error(`❌ Erro atualizando cache: ${err.message}`);
           }
         }, 0);
       }
@@ -177,29 +196,25 @@ async function getCandlesWithCache(client, symbol, tf, forceFresh = false) {
     const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
     
     if (!Array.isArray(candles)) {
-      console.error(`❌ Resposta inválida da Deriv para ${cacheKey}: não é um array`);
+      console.error(`❌ Resposta inválida da Deriv para ${cacheKey}`);
       return candles;
     }
     
-    const closedCandles = candles.filter(c => isCandleClosed(c, tf.seconds));
-    console.log(`📊 ${tf.key}: ${closedCandles.length} candles fechados de ${candles.length} recebidos`);
+    console.log(`📊 ${tf.key}: ${candles.length} candles recebidos`);
     
-    if (closedCandles.length < tf.minRequired) {
-      console.log(`⚠️ ${tf.key}: apenas ${closedCandles.length} candles fechados, mínimo ${tf.minRequired}`);
+    if (redisClient && redisClient.isReady) {
+      await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
+      console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`);
     }
     
-    // Armazenar no cache
-    const ttl = TTL_BY_TIMEFRAME[tf.key] || 60;
-    await redisClient.setEx(cacheKey, ttl, JSON.stringify(closedCandles));
-    
-    return closedCandles;
+    return candles;
     
   } catch (error) {
     console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
-    // Fallback: buscar direto da Deriv sem cache
+    // Fallback: buscar direto da Deriv
     const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
     if (!Array.isArray(candles)) return candles;
-    return candles.filter(c => isCandleClosed(c, tf.seconds));
+    return candles;
   }
 }
 
@@ -759,7 +774,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       const tfForATR = ALL_TIMEFRAMES_CONFIG[atrTimeframe];
       if (tfForATR) {
         console.log(`🔍 Buscando candles do ${atrTimeframe} para ATR...`);
-        const atrCandles = await getCandlesWithCache(client, symbol, tfForATR, true);
+        const atrCandles = await getCandlesWithCache(client, symbol, tfForATR, mode, true);
         if (atrCandles && Array.isArray(atrCandles) && atrCandles.length > 0) {
           historicalCandles = atrCandles;
           console.log(`✅ Obtidos ${historicalCandles.length} candles do ${atrTimeframe} para ATR`);
@@ -788,7 +803,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
           const tfConfig = ALL_TIMEFRAMES_CONFIG[fallbackTf];
           if (tfConfig) {
             console.log(`🔄 Fallback: tentando ${fallbackTf} para ATR...`);
-            const fallbackCandles = await getCandlesWithCache(client, symbol, tfConfig, true);
+            const fallbackCandles = await getCandlesWithCache(client, symbol, tfConfig, mode, true);
             if (fallbackCandles && Array.isArray(fallbackCandles) && fallbackCandles.length > 0) {
               historicalCandles = fallbackCandles;
               console.log(`✅ Fallback: usando ${fallbackTf} para ATR (${historicalCandles.length} candles)`);
@@ -807,7 +822,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         
         const forceFresh = (tf.key === 'M1' || tf.key === 'M5') && (Math.random() > 0.5);
         
-        const candles = await getCandlesWithCache(client, symbol, tf, forceFresh);
+        const candles = await getCandlesWithCache(client, symbol, tf, mode, forceFresh);
         
         if (!Array.isArray(candles)) {
           console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
