@@ -950,8 +950,8 @@ console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
 }
 
 const suggestion = BotExecutionCore.generateEntrySuggestion(
-{ sinal: consolidated.simpleMajority.signal, probabilidade: agreement.agreement / 100 },
-currentPrice
+  { sinal: consolidated.signal, probabilidade: consolidated.confidence },
+  currentPrice
 );
 
 let m1Timing = null, m5Timing = null, m15Timing = null;
