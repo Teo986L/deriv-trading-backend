@@ -43,6 +43,37 @@ app.set('trust proxy', 1);
 // ========== CONFIGURAÇÃO DO REDIS (OPCIONAL) ==========
 let redisClient = null;
 
+// ⚡ TTL ALINHADO AO FECHAMENTO REAL DO CANDLE
+// Em vez de TTL fixo por modo, calculamos quantos segundos faltam
+// para o candle atual fechar — o cache expira junto com ele.
+//
+// Exemplo: são 14:47:23 e o candle M15 fecha às 15:00:00
+//   → secondsUntilClose = 752s  → TTL = 752 - 5 = 747s
+//   → próxima análise após 14:59:55 já busca candles frescos
+//
+// Margem de 5s antes do fechamento: garante que o cache expire
+// levemente antes do candle fechar, assim a próxima requisição
+// sempre pega o candle recém-fechado + o novo candle aberto.
+const CANDLE_CLOSE_MARGIN = 5; // segundos antes do fechamento para invalidar o cache
+
+function getTTLAlignedToCandle(timeframeSeconds) {
+const nowSec = Math.floor(Date.now() / 1000);
+
+// Quantos segundos já se passaram desde o início do candle atual
+const elapsedInCandle = nowSec % timeframeSeconds;
+
+// Quantos segundos faltam para fechar
+const secondsUntilClose = timeframeSeconds - elapsedInCandle;
+
+// TTL = tempo até fechar - margem de segurança
+// Mínimo de 3s para evitar TTL negativo/zero em candles quase fechados
+const ttl = Math.max(secondsUntilClose - CANDLE_CLOSE_MARGIN, 3);
+
+return ttl;
+}
+
+// Mantido por compatibilidade — não é mais usado para o Redis,
+// mas pode ser referenciado em outros lugares do código
 const TTL_BY_TIMEFRAME = {
 'M1': 10,
 'M5': 20,
@@ -53,24 +84,32 @@ const TTL_BY_TIMEFRAME = {
 'H24': 300
 };
 
-// ========== CONFIGURAÇÃO DE TTL POR MODO ==========
+// Mantido por compatibilidade
 const TTL_BY_MODE = {
-'SNIPER': 60,      // 1 minuto (M1)
-'CAÇADOR': 300,    // 5 minutos (M5)
-'PESCADOR': 900    // 15 minutos (M15)
+'SNIPER': 60,
+'CAÇADOR': 300,
+'PESCADOR': 900
 };
 
-// ========== FUNÇÃO PARA OBTER TTL BASEADO NO MODO ==========
+// Mantido por compatibilidade — internamente usa o alinhamento real
 function getTTLByMode(mode, timeframeKey) {
+const tf = ALL_TIMEFRAMES_CONFIG_STATIC[timeframeKey];
+if (tf) return getTTLAlignedToCandle(tf.seconds);
+// fallback se o timeframe não for reconhecido
 const baseTTL = TTL_BY_MODE[mode] || 300;
-
-// Timeframes maiores podem ter TTL um pouco maior (opcional)
-if (timeframeKey === 'H24') return Math.min(baseTTL * 2, 1800);
-if (timeframeKey === 'H4') return Math.min(baseTTL * 1.5, 900);
-if (timeframeKey === 'H1') return Math.min(baseTTL * 1.2, 600);
-
 return baseTTL;
 }
+
+// Mapa estático dos segundos por timeframe (usado antes do ALL_TIMEFRAMES_CONFIG)
+const ALL_TIMEFRAMES_CONFIG_STATIC = {
+'M1':  { seconds: 60 },
+'M5':  { seconds: 300 },
+'M15': { seconds: 900 },
+'M30': { seconds: 1800 },
+'H1':  { seconds: 3600 },
+'H4':  { seconds: 14400 },
+'H24': { seconds: 86400 }
+};
 
 if (process.env.REDIS_URL) {
 try {
@@ -133,14 +172,65 @@ const candleEnd = candle.epoch + timeframeSeconds;
 return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
 }
 
+// ========== IN-MEMORY DEDUP CACHE ==========
+// Evita que múltiplas requisições simultâneas busquem o mesmo timeframe ao mesmo tempo
+const inFlightRequests = new Map();
+
 async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false) {
-const cacheKey = `candles:${symbol}:${tf.key}:${mode}`;
-const ttl = getTTLByMode(mode, tf.key);
+// ⚡ Cache key sem modo: M5 de 1HZ75V é sempre o mesmo candle,
+// independente de ser SNIPER ou CAÇADOR. Evita cache duplicado.
+const cacheKey = `candles:${symbol}:${tf.key}`;
 
-// Se não tiver Redis ou forçar atualização, busca direto da Deriv
-if (!redisClient || !redisClient.isReady || forceFresh) {
+// ⚡ TTL alinhado ao fechamento real do candle.
+// Ex: são 14h47 e o M15 fecha às 15h00 -> TTL = 752s.
+// Cache expira junto com o candle - nunca entrega dado stale.
+const ttl = getTTLAlignedToCandle(tf.seconds);
+console.log(`⏱️ TTL ${tf.key}: ${ttl}s (candle fecha em ~${ttl + CANDLE_CLOSE_MARGIN}s)`);
+
+// ---- REDIS disponível e não forçar atualização ----
+if (redisClient && redisClient.isReady && !forceFresh) {
+try {
+const cached = await redisClient.get(cacheKey);
+if (cached) {
+const remainingTTL = await redisClient.ttl(cacheKey);
+console.log(`✅ Cache hit: ${cacheKey} (TTL restante: ${remainingTTL}s)`);
+
+// Se faltam <= CANDLE_CLOSE_MARGIN segundos, pré-carrega em background
+// para que a próxima requisição já pegue o candle novo
+if (remainingTTL <= CANDLE_CLOSE_MARGIN) {
+setImmediate(async () => {
+try {
+console.log(`🔄 Pré-carregando novo candle em background: ${cacheKey}`);
+const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+if (Array.isArray(freshCandles)) {
+const newTtl = getTTLAlignedToCandle(tf.seconds);
+await redisClient.setEx(cacheKey, newTtl, JSON.stringify(freshCandles));
+console.log(`✅ Cache pré-carregado: ${cacheKey} (novo TTL: ${newTtl}s)`);
+}
+} catch (err) {
+console.error(`❌ Erro pré-carregando cache: ${err.message}`);
+}
+});
+}
+
+return JSON.parse(cached);
+}
+} catch (err) {
+console.error(`❌ Erro lendo Redis para ${cacheKey}:`, err.message);
+// continua para buscar da Deriv
+}
+}
+
+// ---- Dedup: se já existe uma requisição em voo para esta chave, aguarda ela ----
+if (inFlightRequests.has(cacheKey)) {
+console.log(`⏳ Aguardando requisição em voo para ${cacheKey}`);
+return inFlightRequests.get(cacheKey);
+}
+
+// ---- Busca da Deriv (única requisição por cacheKey simultâneo) ----
+const fetchPromise = (async () => {
+try {
 console.log(`🔄 Buscando ${tf.key} direto da Deriv (${tf.candleCount} candles) - modo ${mode}`);
-
 const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
 
 if (!Array.isArray(candles)) {
@@ -148,7 +238,6 @@ console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`
 return candles;
 }
 
-// NÃO filtrar candles fechados - usar todos para maior responsividade
 console.log(`📊 ${tf.key}: recebidos ${candles.length} candles`);
 
 if (candles.length < tf.minRequired) {
@@ -157,65 +246,19 @@ console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.mi
 
 // Armazenar no cache se tiver Redis
 if (redisClient && redisClient.isReady) {
-await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
-console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`);
+redisClient.setEx(cacheKey, ttl, JSON.stringify(candles))
+.then(() => console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`))
+.catch(err => console.error(`❌ Erro salvando cache: ${err.message}`));
 }
 
 return candles;
+} finally {
+inFlightRequests.delete(cacheKey);
 }
+})();
 
-// Com Redis - usar cache
-try {
-const cached = await redisClient.get(cacheKey);
-
-if (cached) {
-const remainingTTL = await redisClient.ttl(cacheKey);
-console.log(`✅ Cache hit: ${cacheKey} (TTL restante: ${remainingTTL}s)`);
-
-// Se TTL estiver baixo, atualizar em background
-if (remainingTTL < 5) {
-setTimeout(async () => {
-try {
-console.log(`🔄 Atualizando cache em background: ${cacheKey}`);
-const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
-if (Array.isArray(freshCandles)) {
-await redisClient.setEx(cacheKey, ttl, JSON.stringify(freshCandles));
-console.log(`✅ Cache atualizado: ${cacheKey}`);
-}
-} catch (err) {
-console.error(`❌ Erro atualizando cache: ${err.message}`);
-}
-}, 0);
-}
-
-return JSON.parse(cached);
-}
-
-// Cache miss - buscar da Deriv e armazenar
-console.log(`🔄 Cache miss: ${cacheKey} - buscando ${tf.candleCount} candles da Deriv`);
-const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
-
-if (!Array.isArray(candles)) {
-console.error(`❌ Resposta inválida da Deriv para ${cacheKey}`);
-return candles;
-}
-
-console.log(`📊 ${tf.key}: ${candles.length} candles recebidos`);
-
-if (redisClient && redisClient.isReady) {
-await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
-console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`);
-}
-
-return candles;
-
-} catch (error) {
-console.error(`❌ Erro no cache para ${cacheKey}:`, error.message);
-// Fallback: buscar direto da Deriv
-const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
-if (!Array.isArray(candles)) return candles;
-return candles;
-}
+inFlightRequests.set(cacheKey, fetchPromise);
+return fetchPromise;
 }
 
 const analyzeLimiter = rateLimit({
@@ -289,13 +332,15 @@ throw err;
 return derivConnectionPromise;
 }
 
-// ========== FUNÇÃO: OBTER PREÇO ATUAL VIA TICK ==========
+// ========== FUNÇÃO: OBTER PREÇO ATUAL VIA TICK (timeout reduzido) ==========
 async function getCurrentPrice(client, symbol) {
 return new Promise((resolve) => {
+// ⚡ Reduzido de 2000ms para 800ms — tick normalmente chega em <200ms
 const timeout = setTimeout(() => {
 console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
+client.removeListener(reqId);
 resolve(null);
-}, 2000);
+}, 800);
 
 const reqId = Date.now();
 const handler = (response) => {
@@ -313,7 +358,7 @@ resolve(response.tick.quote);
 
 client.addListener(reqId, handler);
 
-// 🔥 CORREÇÃO: usa o WebSocket diretamente
+// 🔥 usa o WebSocket diretamente
 if (client.ws && client.ws.readyState === client.ws.OPEN) {
 client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
 } else {
@@ -812,93 +857,88 @@ if (sistemaBase.sistemaPesos && sistemaBase.sistemaPesos.setTipoAtivo) {
 sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
 }
 
-// ========== COLETAR CANDLES PARA ANÁLISE REFINADA POR MODO ==========
-let historicalCandles = null;
-const atrTimeframe = getATRTimeframeByMode(mode);
+// ========== FASE 1: BUSCA DE TODOS OS CANDLES EM PARALELO ==========
+// ⚡ O ATR usa o mesmo timeframe que já será buscado para análise.
+//    Buscamos tudo de uma vez com Promise.all — sem espera serial.
+const atrTimeframeKey = getATRTimeframeByMode(mode);
+console.log(`📊 Modo ${mode} - usando ${atrTimeframeKey} para cálculo de ATR/volatilidade`);
 
-console.log(`📊 Modo ${mode} - usando ${atrTimeframe} para cálculo de ATR/volatilidade`);
+// Conjunto de timeframes únicos a buscar (ATR + análise, sem duplicatas)
+const allTfKeysToFetch = Array.from(
+new Set([atrTimeframeKey, ...TRADING_MODES[mode].timeframes])
+);
 
-// Primeiro, tentar buscar o timeframe específico para ATR
+console.log(`⚡ Buscando ${allTfKeysToFetch.length} timeframes em paralelo: ${allTfKeysToFetch.join(', ')}`);
+
+// Mapa tfKey → candles (busca paralela)
+const candlesMap = {};
+await Promise.all(
+allTfKeysToFetch.map(async (tfKey) => {
+const tf = ALL_TIMEFRAMES_CONFIG[tfKey];
+if (!tf) return;
 try {
-const tfForATR = ALL_TIMEFRAMES_CONFIG[atrTimeframe];
-if (tfForATR) {
-console.log(`🔍 Buscando candles do ${atrTimeframe} para ATR...`);
-const atrCandles = await getCandlesWithCache(client, symbol, tfForATR, mode, true);
-if (atrCandles && Array.isArray(atrCandles) && atrCandles.length > 0) {
-historicalCandles = atrCandles;
-console.log(`✅ Obtidos ${historicalCandles.length} candles do ${atrTimeframe} para ATR`);
+// ⚡ forceFresh REMOVIDO do M1/M5 — o dedup cache já garante frescor.
+//    Cache Redis é sempre respeitado para evitar busca dupla.
+const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
+if (Array.isArray(candles) && candles.length > 0) {
+candlesMap[tfKey] = candles;
+console.log(`✅ ${tfKey}: ${candles.length} candles prontos`);
 } else {
-console.log(`⚠️ Não foi possível obter candles do ${atrTimeframe}, tentando fallback...`);
-}
+console.log(`⚠️ ${tfKey}: sem candles válidos`);
 }
 } catch (err) {
-console.error(`❌ Erro ao buscar ${atrTimeframe}: ${err.message}`);
+console.error(`❌ Erro ao buscar ${tfKey}:`, err.message);
 }
+})
+);
 
-// Fallback: se não conseguiu, tenta o próximo timeframe mais granular
-if (!historicalCandles || historicalCandles.length === 0) {
+// ATR: usa candles do timeframe preferido, com fallback
+let historicalCandles = candlesMap[atrTimeframeKey] || null;
+if (!historicalCandles) {
 const fallbackMap = {
-'M1': ['M5', 'M15'],      // Sniper fallback: M5, M15
-'M5': ['M1', 'M15'],      // Caçador fallback: M1, M15
-'M15': ['M5', 'H1']       // Pescador fallback: M5, H1
+'M1': ['M5', 'M15'],
+'M5': ['M1', 'M15'],
+'M15': ['M5', 'H1']
 };
+for (const fbKey of (fallbackMap[atrTimeframeKey] || ['M5', 'M15'])) {
+if (candlesMap[fbKey]) {
+historicalCandles = candlesMap[fbKey];
+console.log(`🔄 Fallback ATR: usando ${fbKey}`);
+break;
+}
+}
+}
 
-const fallbacks = fallbackMap[atrTimeframe] || ['M5', 'M15'];
+// ========== FASE 2: ANÁLISE DE TODOS OS TIMEFRAMES EM PARALELO ==========
+console.log(`⚡ Analisando ${timeframesToAnalyze.length} timeframes em paralelo`);
 
-for (const fallbackTf of fallbacks) {
-if (historicalCandles && historicalCandles.length > 0) break;
-
+await Promise.all(
+timeframesToAnalyze.map(async (tf) => {
 try {
-const tfConfig = ALL_TIMEFRAMES_CONFIG[fallbackTf];
-if (tfConfig) {
-console.log(`🔄 Fallback: tentando ${fallbackTf} para ATR...`);
-const fallbackCandles = await getCandlesWithCache(client, symbol, tfConfig, mode, true);
-if (fallbackCandles && Array.isArray(fallbackCandles) && fallbackCandles.length > 0) {
-historicalCandles = fallbackCandles;
-console.log(`✅ Fallback: usando ${fallbackTf} para ATR (${historicalCandles.length} candles)`);
+const candles = candlesMap[tf.key];
+if (!candles) {
+console.log(`⚠️ ${tf.key}: candles não disponíveis, pulando análise`);
+return;
 }
-}
-} catch (err) {
-console.error(`❌ Erro no fallback ${fallbackTf}: ${err.message}`);
-}
-}
-}
-
-// Agora, processar todos os timeframes do modo normalmente
-for (const tf of timeframesToAnalyze) {
-try {
-console.log(`🔍 Analisando ${tf.key}...`);
-
-const forceFresh = (tf.key === 'M1' || tf.key === 'M5') && (Math.random() > 0.5);
-
-const candles = await getCandlesWithCache(client, symbol, tf, mode, forceFresh);
-
-if (!Array.isArray(candles)) {
-console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
-continue;
-}
-
 if (candles.length < tf.minRequired) {
 console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
-continue;
+return;
 }
-
 const analysis = await sistemaBase.analisar(candles, tf.key);
-
 if (analysis && !analysis.erro) {
 mtfManager.addAnalysis(tf.key, analysis);
 console.log(`✅ ${tf.key} analisado com sucesso`);
 }
 } catch (err) {
-console.error(`❌ Erro ao buscar/analisar ${tf.key}:`, err.message);
+console.error(`❌ Erro ao analisar ${tf.key}:`, err.message);
 }
-}
+})
+);
 
 const consolidated = mtfManager.consolidateSignals();
 const agreement = mtfManager.calculateAgreement();
 
 // ========== BLOQUEIO POR DIVERGÊNCIA DE TIMEFRAMES ==========
-// Verifica se há divergência entre os timeframes do modo atual
 const timeframesSignals = [];
 for (const tfKey of TRADING_MODES[mode].timeframes) {
     const analysis = mtfManager.timeframes[tfKey]?.analysis;
@@ -910,52 +950,40 @@ for (const tfKey of TRADING_MODES[mode].timeframes) {
 const callCountDiv = timeframesSignals.filter(s => s === 'CALL').length;
 const putCountDiv = timeframesSignals.filter(s => s === 'PUT').length;
 
-// Se houver pelo menos um de cada lado (divergência)
 if (callCountDiv > 0 && putCountDiv > 0) {
     console.log(`⚠️ Divergência de timeframes detectada: ${callCountDiv} CALL vs ${putCountDiv} PUT - forçando HOLD`);
     consolidated.simpleMajority.signal = "HOLD";
     consolidated.signal = "HOLD";
     consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
-// =================================================
 
 // ========== BLOQUEIO POR DIVERGÊNCIA MACD ==========
-// Verifica qualquer timeframe do modo atual
 let hasMacdDivergence = false;
 for (const tfKey of TRADING_MODES[mode].timeframes) {
 const analysis = mtfManager.timeframes[tfKey]?.analysis;
 if (analysis && analysis.divergencia_macd && analysis.divergencia_macd.divergencia) {
 hasMacdDivergence = true;
 console.log(`⚠️ Divergência MACD detectada em ${tfKey} - forçando HOLD (${analysis.divergencia_macd.tipo})`);
-break; // basta uma divergência para bloquear
+break;
 }
 }
 if (hasMacdDivergence) {
-// Força sinal HOLD e reduz confiança
 consolidated.simpleMajority.signal = "HOLD";
 consolidated.signal = "HOLD";
 consolidated.confidence = Math.min(consolidated.confidence, 0.3);
-// NÃO inclui motivo na resposta (apenas log)
 }
-// =================================================
 
-// ========== PREÇO EM TEMPO REAL (VIA TICK) ==========
+// ========== PREÇO EM TEMPO REAL (tick + análise em paralelo) ==========
+// ⚡ O tick roda em paralelo com o cálculo de timing — não bloqueia mais
 let currentPrice = 0;
 let priceSource = 'unknown';
 
-try {
-const tickPrice = await getCurrentPrice(client, symbol);
-if (tickPrice) {
-currentPrice = tickPrice;
+const tickResult = await getCurrentPrice(client, symbol);
+if (tickResult) {
+currentPrice = tickResult;
 priceSource = 'tick';
 console.log(`💰 Preço via tick: ${currentPrice}`);
-}
-} catch (error) {
-console.log(`⚠️ Erro ao obter tick: ${error.message}`);
-}
-
-if (!currentPrice) {
-if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
+} else if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
 currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
 priceSource = 'M1';
 console.log(`💰 Preço via M1: ${currentPrice}`);
@@ -968,7 +996,6 @@ const firstTf = timeframesToAnalyze[0]?.key || 'M5';
 currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
 priceSource = firstTf;
 console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
-}
 }
 
 const suggestion = BotExecutionCore.generateEntrySuggestion(
@@ -1006,7 +1033,6 @@ let analiseRefinada = null;
 let validacaoRisco = null;
 
 try {
-// 🔥 CORREÇÃO: mapeia o modo com acento para o formato esperado pelo TraderBotAnalise
 const modeMap = {
 'SNIPER': 'SNIPER',
 'CAÇADOR': 'CACADOR',
@@ -1015,16 +1041,14 @@ const modeMap = {
 const modoIngles = modeMap[mode] || 'CACADOR';
 console.log(`🔄 Mapeando modo: ${mode} → ${modoIngles}`);
 
-// Construir dados no formato esperado pelo TraderBotAnalise
 const dadosMercado = {
 ativo: symbol,
 precoAtual: currentPrice,
-volume: 0, // Volume não está disponível via API da Deriv
-precosHistoricos: historicalCandles || [], // Usar candles do timeframe específico do modo
+volume: 0,
+precosHistoricos: historicalCandles || [],
 timeframes: {}
 };
 
-// Preencher timeframes com as análises já existentes
 for (const tfKey of TRADING_MODES[mode].timeframes) {
 const analysis = mtfManager.timeframes[tfKey]?.analysis;
 if (analysis) {
@@ -1034,12 +1058,11 @@ rsi: analysis.rsi || 50,
 tendencia: analysis.sinal || 'HOLD',
 volatilidade: analysis.volatilidade || 1.0,
 precoAtual: analysis.preco_atual || currentPrice,
-precos: [] // não necessário pois já temos os valores prontos
+precos: []
 };
 }
 }
 
-// Criar instância do analisador refinado
 const botAnalise = new TraderBotAnalise({
 confiancaMinimaOperar: 60,
 confiancaAlta: 75,
@@ -1047,10 +1070,8 @@ adxTendenciaForte: 25,
 adxSemTendencia: 20
 });
 
-// Gerar análise refinada usando o modo mapeado
 analiseRefinada = botAnalise.gerarAnalise(dadosMercado, modoIngles);
 
-// Validar operação com base no risco (assumindo saldo padrão de $1000)
 const saldoUsuario = req.user?.saldo || 1000;
 validacaoRisco = botAnalise.validarOperacao(analiseRefinada, saldoUsuario, 2);
 
@@ -1058,7 +1079,6 @@ console.log(`📊 Análise refinada: sinal=${analiseRefinada.sinal.direcao}, con
 
 } catch (err) {
 console.error('❌ Erro na análise refinada:', err.message);
-// Não falha a requisição principal se a análise refinada falhar
 analiseRefinada = { erro: err.message };
 }
 
@@ -1073,14 +1093,13 @@ probabilidade: tfData.analysis.probabilidade,
 adx: tfData.analysis.adx,
 rsi: tfData.analysis.rsi,
 preco_atual: tfData.analysis.preco_atual,
-// ========== NOVOS CAMPOS ==========
 macd_phase: tfData.analysis.macd_phase,
 divergencia_macd: tfData.analysis.divergencia_macd,
 };
 }
 });
 
-    // 🔍 LOG DE DIAGNÓSTICO: Verificar sinais antes de enviar resposta
+    // 🔍 LOG DE DIAGNÓSTICO
     console.log('🔍 [SERVER] allAnalyses FINAL antes da resposta:');
     for (const [key, analysis] of Object.entries(mtfManager.allAnalyses)) {
       console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
@@ -1104,7 +1123,6 @@ priceSource: priceSource,
 ...(m1Timing && { m1_timing: m1Timing }),
 ...(m5Timing && { m5_timing: m5Timing }),
 ...(m15Timing && { m15_timing: m15Timing }),
-// ========== NOVAS INFORMAÇÕES ==========
 tipo_ativo: consolidated.tipo_ativo,
 config_ativo: consolidated.config_ativo,
 ciclo_completo: consolidated.ciclo_completo,
@@ -1127,7 +1145,6 @@ stopLoss: suggestion.stopLoss,
 takeProfit: suggestion.takeProfit
 },
 timeframes: responseTimeframes,
-// ========== ANÁLISE REFINADA ADICIONADA ==========
 refined_analysis: analiseRefinada,
 risk_validation: validacaoRisco,
 metadata: {
@@ -1169,6 +1186,7 @@ console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
 console.log(`📊 Configuração de candles: 400 para todos os timeframes (igual ao script.js)`);
 console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança`);
 console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
+console.log(`⚡ Busca e análise de timeframes em paralelo (Promise.all)`);
 
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
