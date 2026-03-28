@@ -332,29 +332,40 @@ throw err;
 return derivConnectionPromise;
 }
 
-// ========== FUNÇÃO: OBTER PREÇO ATUAL VIA TICK (timeout reduzido) ==========
+// ========== FUNÇÃO: OBTER PREÇO ATUAL VIA TICK ==========
 async function getCurrentPrice(client, symbol) {
 return new Promise((resolve) => {
-// ⚡ Reduzido de 2000ms para 800ms — tick normalmente chega em <200ms
-const timeout = setTimeout(() => {
-console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
-client.removeListener(reqId);
-resolve(null);
-}, 800);
-
+// reqId e handler declarados ANTES do setTimeout para ficarem no mesmo scope
 const reqId = Date.now();
+
 const handler = (response) => {
 if (response.error) {
 console.log(`⚠️ Erro no tick: ${response.error.message}`);
 clearTimeout(timeout);
-client.removeListener(reqId);
+// removeListener precisa da função handler, não do reqId
+if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
 resolve(null);
 } else if (response.tick && response.tick.symbol === symbol) {
 clearTimeout(timeout);
-client.removeListener(reqId);
+if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
 resolve(response.tick.quote);
 }
 };
+
+// ⚡ Timeout de 800ms — tick normalmente chega em <200ms
+const timeout = setTimeout(() => {
+console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
+if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
+resolve(null);
+}, 800);
+
+// Verifica se o DerivClient suporta listeners antes de tentar registar
+if (typeof client.addListener !== 'function') {
+console.log(`⚠️ DerivClient não suporta addListener`);
+clearTimeout(timeout);
+resolve(null);
+return;
+}
 
 client.addListener(reqId, handler);
 
@@ -364,7 +375,7 @@ client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
 } else {
 console.log(`⚠️ WebSocket não conectado para tick de ${symbol}`);
 clearTimeout(timeout);
-client.removeListener(reqId);
+if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
 resolve(null);
 }
 });
