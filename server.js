@@ -64,6 +64,7 @@ const TTL_BY_MODE = {
 function getTTLByMode(mode, timeframeKey) {
 const baseTTL = TTL_BY_MODE[mode] || 300;
 
+// Timeframes maiores podem ter TTL um pouco maior (opcional)
 if (timeframeKey === 'H24') return Math.min(baseTTL * 2, 1800);
 if (timeframeKey === 'H4') return Math.min(baseTTL * 1.5, 900);
 if (timeframeKey === 'H1') return Math.min(baseTTL * 1.2, 600);
@@ -111,7 +112,7 @@ const modeATRMap = {
 'CACADOR': 'M5',
 'PESCADOR': 'M15'
 };
-return modeATRMap[mode] || 'M5';
+return modeATRMap[mode] || 'M5'; // fallback para M5
 }
 
 // ========== CONFIGURAÇÃO ATUALIZADA - ALINHADA COM SCRIPT.JS ==========
@@ -147,12 +148,14 @@ console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`
 return candles;
 }
 
+// NÃO filtrar candles fechados - usar todos para maior responsividade
 console.log(`📊 ${tf.key}: recebidos ${candles.length} candles`);
 
 if (candles.length < tf.minRequired) {
 console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
 }
 
+// Armazenar no cache se tiver Redis
 if (redisClient && redisClient.isReady) {
 await redisClient.setEx(cacheKey, ttl, JSON.stringify(candles));
 console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`);
@@ -169,6 +172,7 @@ if (cached) {
 const remainingTTL = await redisClient.ttl(cacheKey);
 console.log(`✅ Cache hit: ${cacheKey} (TTL restante: ${remainingTTL}s)`);
 
+// Se TTL estiver baixo, atualizar em background
 if (remainingTTL < 5) {
 setTimeout(async () => {
 try {
@@ -286,13 +290,12 @@ return derivConnectionPromise;
 }
 
 // ========== FUNÇÃO: OBTER PREÇO ATUAL VIA TICK ==========
-// CORREÇÃO: timeout reduzido de 2000ms para 800ms — falha rápido e vai pro fallback
 async function getCurrentPrice(client, symbol) {
 return new Promise((resolve) => {
 const timeout = setTimeout(() => {
 console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
 resolve(null);
-}, 800);
+}, 2000);
 
 const reqId = Date.now();
 const handler = (response) => {
@@ -310,6 +313,7 @@ resolve(response.tick.quote);
 
 client.addListener(reqId, handler);
 
+// 🔥 CORREÇÃO: usa o WebSocket diretamente
 if (client.ws && client.ws.readyState === client.ws.OPEN) {
 client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
 } else {
@@ -320,7 +324,6 @@ resolve(null);
 }
 });
 }
-
 app.get('/health', (req, res) => {
 res.status(200).send('OK');
 });
@@ -639,9 +642,11 @@ const adx = m15Analysis.adx || 0;
 const rsi = m15Analysis.rsi || 50;
 const temTendenciaForte = adx >= 25;
 
+// 🔥 DETECTAR TIPO DE ATIVO (vem do backend)
 const tipoAtivo = m15Analysis.tipo_ativo || 'indice_normal';
 const limite = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
 
+// 🔥 ALERTA DE PULLBACK (usando limites por tipo de ativo)
 let alertaPullback = null;
 if (primarySignal === 'PUT' && rsi < limite.pullback) {
 const nivelAlerta = rsi < limite.extremo ? 'EXTREMO' : 'ALERTA';
@@ -781,7 +786,7 @@ return res.status(400).json({ error: 'Símbolo é obrigatório' });
 }
 
 if (!mode || !TRADING_MODES[mode]) {
-return res.status(400).json({
+return res.status(400).json({ 
 error: 'Modo de trading inválido. Use: SNIPER, CAÇADOR ou PESCADOR',
 availableModes: Object.keys(TRADING_MODES)
 });
@@ -795,9 +800,10 @@ const client = await getDerivClient();
 const timeframesToAnalyze = TRADING_MODES[mode].timeframes
 .map(tfKey => ALL_TIMEFRAMES_CONFIG[tfKey]);
 
+// ========== PASSA O SÍMBOLO PARA O MTF MANAGER ==========
 const mtfManager = new MultiTimeframeManager(symbol);
 
-const tipoAtivo = symbol.startsWith('R_') ? 'volatility_index' :
+const tipoAtivo = symbol.startsWith('R_') ? 'volatility_index' : 
 (symbol.includes('frx') ? 'forex' : 'indice_normal');
 
 const sistemaBase = new SistemaAnaliseInteligente(symbol);
@@ -806,26 +812,20 @@ if (sistemaBase.sistemaPesos && sistemaBase.sistemaPesos.setTipoAtivo) {
 sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
 }
 
-// ========== CACHE LOCAL DE CANDLES PARA EVITAR DOUBLE FETCH ==========
-// CORREÇÃO Bug #2: guarda os candles já buscados pelo ATR para reutilizar no loop
-const candlesLocalCache = {};
-
-// ========== COLETAR CANDLES PARA ATR ==========
+// ========== COLETAR CANDLES PARA ANÁLISE REFINADA POR MODO ==========
 let historicalCandles = null;
 const atrTimeframe = getATRTimeframeByMode(mode);
 
 console.log(`📊 Modo ${mode} - usando ${atrTimeframe} para cálculo de ATR/volatilidade`);
 
+// Primeiro, tentar buscar o timeframe específico para ATR
 try {
 const tfForATR = ALL_TIMEFRAMES_CONFIG[atrTimeframe];
 if (tfForATR) {
 console.log(`🔍 Buscando candles do ${atrTimeframe} para ATR...`);
-// CORREÇÃO Bug #1: forceFresh=false — respeita o cache do Redis
-const atrCandles = await getCandlesWithCache(client, symbol, tfForATR, mode, false);
+const atrCandles = await getCandlesWithCache(client, symbol, tfForATR, mode, true);
 if (atrCandles && Array.isArray(atrCandles) && atrCandles.length > 0) {
 historicalCandles = atrCandles;
-// CORREÇÃO Bug #2: guarda no cache local para o loop principal reutilizar
-candlesLocalCache[atrTimeframe] = atrCandles;
 console.log(`✅ Obtidos ${historicalCandles.length} candles do ${atrTimeframe} para ATR`);
 } else {
 console.log(`⚠️ Não foi possível obter candles do ${atrTimeframe}, tentando fallback...`);
@@ -835,12 +835,12 @@ console.log(`⚠️ Não foi possível obter candles do ${atrTimeframe}, tentand
 console.error(`❌ Erro ao buscar ${atrTimeframe}: ${err.message}`);
 }
 
-// Fallback para ATR se necessário
+// Fallback: se não conseguiu, tenta o próximo timeframe mais granular
 if (!historicalCandles || historicalCandles.length === 0) {
 const fallbackMap = {
-'M1': ['M5', 'M15'],
-'M5': ['M1', 'M15'],
-'M15': ['M5', 'H1']
+'M1': ['M5', 'M15'],      // Sniper fallback: M5, M15
+'M5': ['M1', 'M15'],      // Caçador fallback: M1, M15
+'M15': ['M5', 'H1']       // Pescador fallback: M5, H1
 };
 
 const fallbacks = fallbackMap[atrTimeframe] || ['M5', 'M15'];
@@ -852,11 +852,9 @@ try {
 const tfConfig = ALL_TIMEFRAMES_CONFIG[fallbackTf];
 if (tfConfig) {
 console.log(`🔄 Fallback: tentando ${fallbackTf} para ATR...`);
-// CORREÇÃO Bug #1: forceFresh=false aqui também
-const fallbackCandles = await getCandlesWithCache(client, symbol, tfConfig, mode, false);
+const fallbackCandles = await getCandlesWithCache(client, symbol, tfConfig, mode, true);
 if (fallbackCandles && Array.isArray(fallbackCandles) && fallbackCandles.length > 0) {
 historicalCandles = fallbackCandles;
-candlesLocalCache[fallbackTf] = fallbackCandles;
 console.log(`✅ Fallback: usando ${fallbackTf} para ATR (${historicalCandles.length} candles)`);
 }
 }
@@ -866,52 +864,33 @@ console.error(`❌ Erro no fallback ${fallbackTf}: ${err.message}`);
 }
 }
 
-// ========== PROCESSAR TIMEFRAMES EM PARALELO ==========
-// CORREÇÃO Gargalo principal: era loop sequencial com await, agora é Promise.all
-console.log(`🔍 Analisando ${timeframesToAnalyze.map(t => t.key).join(', ')} em paralelo...`);
-
-const parallelResults = await Promise.all(
-timeframesToAnalyze.map(async (tf) => {
+// Agora, processar todos os timeframes do modo normalmente
+for (const tf of timeframesToAnalyze) {
 try {
 console.log(`🔍 Analisando ${tf.key}...`);
 
-// CORREÇÃO Bug #2: reutiliza candles do ATR se já foram buscados
-// CORREÇÃO Bug #3: removido Math.random() — cache controlado pelo TTL do Redis
-let candles = candlesLocalCache[tf.key] || null;
+const forceFresh = (tf.key === 'M1' || tf.key === 'M5') && (Math.random() > 0.5);
 
-if (!candles) {
-candles = await getCandlesWithCache(client, symbol, tf, mode, false);
-}
+const candles = await getCandlesWithCache(client, symbol, tf, mode, forceFresh);
 
 if (!Array.isArray(candles)) {
 console.error(`❌ Resposta inválida para ${tf.key}: não é um array`);
-return null;
+continue;
 }
 
 if (candles.length < tf.minRequired) {
 console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
-return null;
+continue;
 }
 
 const analysis = await sistemaBase.analisar(candles, tf.key);
 
 if (analysis && !analysis.erro) {
+mtfManager.addAnalysis(tf.key, analysis);
 console.log(`✅ ${tf.key} analisado com sucesso`);
-return { tfKey: tf.key, analysis };
 }
-
-return null;
 } catch (err) {
 console.error(`❌ Erro ao buscar/analisar ${tf.key}:`, err.message);
-return null;
-}
-})
-);
-
-// Registrar resultados no manager
-for (const result of parallelResults) {
-if (result) {
-mtfManager.addAnalysis(result.tfKey, result.analysis);
 }
 }
 
@@ -919,42 +898,48 @@ const consolidated = mtfManager.consolidateSignals();
 const agreement = mtfManager.calculateAgreement();
 
 // ========== BLOQUEIO POR DIVERGÊNCIA DE TIMEFRAMES ==========
+// Verifica se há divergência entre os timeframes do modo atual
 const timeframesSignals = [];
 for (const tfKey of TRADING_MODES[mode].timeframes) {
-const analysis = mtfManager.timeframes[tfKey]?.analysis;
-if (analysis && analysis.sinal && analysis.sinal !== 'HOLD') {
-timeframesSignals.push(analysis.sinal);
-}
+    const analysis = mtfManager.timeframes[tfKey]?.analysis;
+    if (analysis && analysis.sinal && analysis.sinal !== 'HOLD') {
+        timeframesSignals.push(analysis.sinal);
+    }
 }
 
 const callCountDiv = timeframesSignals.filter(s => s === 'CALL').length;
 const putCountDiv = timeframesSignals.filter(s => s === 'PUT').length;
 
+// Se houver pelo menos um de cada lado (divergência)
 if (callCountDiv > 0 && putCountDiv > 0) {
-console.log(`⚠️ Divergência de timeframes detectada: ${callCountDiv} CALL vs ${putCountDiv} PUT - forçando HOLD`);
-consolidated.simpleMajority.signal = "HOLD";
-consolidated.signal = "HOLD";
-consolidated.confidence = Math.min(consolidated.confidence, 0.3);
+    console.log(`⚠️ Divergência de timeframes detectada: ${callCountDiv} CALL vs ${putCountDiv} PUT - forçando HOLD`);
+    consolidated.simpleMajority.signal = "HOLD";
+    consolidated.signal = "HOLD";
+    consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
+// =================================================
 
 // ========== BLOQUEIO POR DIVERGÊNCIA MACD ==========
+// Verifica qualquer timeframe do modo atual
 let hasMacdDivergence = false;
 for (const tfKey of TRADING_MODES[mode].timeframes) {
 const analysis = mtfManager.timeframes[tfKey]?.analysis;
 if (analysis && analysis.divergencia_macd && analysis.divergencia_macd.divergencia) {
 hasMacdDivergence = true;
 console.log(`⚠️ Divergência MACD detectada em ${tfKey} - forçando HOLD (${analysis.divergencia_macd.tipo})`);
-break;
+break; // basta uma divergência para bloquear
 }
 }
 if (hasMacdDivergence) {
+// Força sinal HOLD e reduz confiança
 consolidated.simpleMajority.signal = "HOLD";
 consolidated.signal = "HOLD";
 consolidated.confidence = Math.min(consolidated.confidence, 0.3);
+// NÃO inclui motivo na resposta (apenas log)
 }
+// =================================================
 
 // ========== PREÇO EM TEMPO REAL (VIA TICK) ==========
-// CORREÇÃO Gargalo secundário: timeout reduzido para 800ms (era 2000ms)
 let currentPrice = 0;
 let priceSource = 'unknown';
 
@@ -987,8 +972,8 @@ console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
 }
 
 const suggestion = BotExecutionCore.generateEntrySuggestion(
-{ sinal: consolidated.signal, probabilidade: consolidated.confidence },
-currentPrice
+  { sinal: consolidated.signal, probabilidade: consolidated.confidence },
+  currentPrice
 );
 
 let m1Timing = null, m5Timing = null, m15Timing = null;
@@ -1021,6 +1006,7 @@ let analiseRefinada = null;
 let validacaoRisco = null;
 
 try {
+// 🔥 CORREÇÃO: mapeia o modo com acento para o formato esperado pelo TraderBotAnalise
 const modeMap = {
 'SNIPER': 'SNIPER',
 'CAÇADOR': 'CACADOR',
@@ -1029,14 +1015,16 @@ const modeMap = {
 const modoIngles = modeMap[mode] || 'CACADOR';
 console.log(`🔄 Mapeando modo: ${mode} → ${modoIngles}`);
 
+// Construir dados no formato esperado pelo TraderBotAnalise
 const dadosMercado = {
 ativo: symbol,
 precoAtual: currentPrice,
-volume: 0,
-precosHistoricos: historicalCandles || [],
+volume: 0, // Volume não está disponível via API da Deriv
+precosHistoricos: historicalCandles || [], // Usar candles do timeframe específico do modo
 timeframes: {}
 };
 
+// Preencher timeframes com as análises já existentes
 for (const tfKey of TRADING_MODES[mode].timeframes) {
 const analysis = mtfManager.timeframes[tfKey]?.analysis;
 if (analysis) {
@@ -1046,11 +1034,12 @@ rsi: analysis.rsi || 50,
 tendencia: analysis.sinal || 'HOLD',
 volatilidade: analysis.volatilidade || 1.0,
 precoAtual: analysis.preco_atual || currentPrice,
-precos: []
+precos: [] // não necessário pois já temos os valores prontos
 };
 }
 }
 
+// Criar instância do analisador refinado
 const botAnalise = new TraderBotAnalise({
 confiancaMinimaOperar: 60,
 confiancaAlta: 75,
@@ -1058,8 +1047,10 @@ adxTendenciaForte: 25,
 adxSemTendencia: 20
 });
 
+// Gerar análise refinada usando o modo mapeado
 analiseRefinada = botAnalise.gerarAnalise(dadosMercado, modoIngles);
 
+// Validar operação com base no risco (assumindo saldo padrão de $1000)
 const saldoUsuario = req.user?.saldo || 1000;
 validacaoRisco = botAnalise.validarOperacao(analiseRefinada, saldoUsuario, 2);
 
@@ -1067,6 +1058,7 @@ console.log(`📊 Análise refinada: sinal=${analiseRefinada.sinal.direcao}, con
 
 } catch (err) {
 console.error('❌ Erro na análise refinada:', err.message);
+// Não falha a requisição principal se a análise refinada falhar
 analiseRefinada = { erro: err.message };
 }
 
@@ -1081,16 +1073,18 @@ probabilidade: tfData.analysis.probabilidade,
 adx: tfData.analysis.adx,
 rsi: tfData.analysis.rsi,
 preco_atual: tfData.analysis.preco_atual,
+// ========== NOVOS CAMPOS ==========
 macd_phase: tfData.analysis.macd_phase,
 divergencia_macd: tfData.analysis.divergencia_macd,
 };
 }
 });
 
-console.log('🔍 [SERVER] allAnalyses FINAL antes da resposta:');
-for (const [key, analysis] of Object.entries(mtfManager.allAnalyses)) {
-console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
-}
+    // 🔍 LOG DE DIAGNÓSTICO: Verificar sinais antes de enviar resposta
+    console.log('🔍 [SERVER] allAnalyses FINAL antes da resposta:');
+    for (const [key, analysis] of Object.entries(mtfManager.allAnalyses)) {
+      console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+    }
 
 const responseTime = Date.now() - startTime;
 
@@ -1110,6 +1104,7 @@ priceSource: priceSource,
 ...(m1Timing && { m1_timing: m1Timing }),
 ...(m5Timing && { m5_timing: m5Timing }),
 ...(m15Timing && { m15_timing: m15Timing }),
+// ========== NOVAS INFORMAÇÕES ==========
 tipo_ativo: consolidated.tipo_ativo,
 config_ativo: consolidated.config_ativo,
 ciclo_completo: consolidated.ciclo_completo,
@@ -1132,6 +1127,7 @@ stopLoss: suggestion.stopLoss,
 takeProfit: suggestion.takeProfit
 },
 timeframes: responseTimeframes,
+// ========== ANÁLISE REFINADA ADICIONADA ==========
 refined_analysis: analiseRefinada,
 risk_validation: validacaoRisco,
 metadata: {
@@ -1145,7 +1141,7 @@ res.json(response);
 
 } catch (error) {
 console.error('❌ Erro na análise:', error);
-res.status(500).json({
+res.status(500).json({ 
 error: error.message,
 stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
 });
@@ -1158,7 +1154,7 @@ res.status(404).json({ error: 'Rota não encontrada' });
 
 app.use((err, req, res, next) => {
 console.error('❌ Erro global:', err);
-res.status(500).json({
+res.status(500).json({ 
 error: 'Erro interno do servidor',
 message: process.env.NODE_ENV === 'development' ? err.message : undefined
 });
