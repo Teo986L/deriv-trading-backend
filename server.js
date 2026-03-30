@@ -483,40 +483,109 @@ const RSI_LIMITS_BY_ASSET = {
   'indice_normal':  { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Índice Normal' }
 };
 
-// ========== HELPER: GERAR ALERTA DE PULLBACK ==========
+// ========== HELPER: GERAR ALERTA DE PULLBACK (VERSÃO CORRIGIDA - DETECÇÃO RÁPIDA) ==========
 // Centraliza a lógica usada por M1, M5 e M15
 function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
   const limite = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
   let alertaPullback = null;
 
-  if (primarySignal === 'PUT' && rsi < limite.pullback) {
-    const nivelAlerta = rsi < limite.extremo ? 'EXTREMO' : 'ALERTA';
-    alertaPullback = {
-      tipo: 'PULLBACK_IMINENTE',
-      mensagem: `⚠️ RSI ${timeframeLabel} em ${rsi.toFixed(0)} (sobrevenda ${limite.descricao}) - Pullback iminente! Aguarde retomada da queda.`,
-      acao: 'AGUARDAR_RETOMADA',
-      nivel: nivelAlerta,
-      tipo_ativo: tipoAtivo,
-      limite_pullback: limite.pullback
-    };
+  // 🔥 DETECÇÃO RÁPIDA PARA PUT (sobrevenda)
+  if (primarySignal === 'PUT') {
+    // Nível 1: Alerta preventivo (quando está se aproximando)
+    if (rsi < limite.pullback + 12 && rsi >= limite.pullback + 5) {
+      alertaPullback = {
+        tipo: 'PULLBACK_PREVENTIVO',
+        mensagem: `⚠️ [PREVENTIVO] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - aproximando da sobrevenda (${limite.pullback}). Pullback em breve!`,
+        acao: 'PREPARAR_PULLBACK',
+        nivel: 'PREVENTIVO',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        distancia_limite: rsi - limite.pullback,
+        tempo_estimado: 'próximos 1-3 candles'
+      };
+    }
+    // Nível 2: Alerta iminente (quando está quase no limite)
+    else if (rsi < limite.pullback + 5 && rsi >= limite.pullback) {
+      alertaPullback = {
+        tipo: 'PULLBACK_IMINENTE',
+        mensagem: `⚠️ [IMINENTE] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - ZONA DE SOBREVENDA! Pullback iminente a qualquer momento!`,
+        acao: 'AGUARDAR_RETOMADA',
+        nivel: 'IMINENTE',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        distancia_limite: rsi - limite.pullback,
+        tempo_estimado: 'próximo candle'
+      };
+    }
+    // Nível 3: Alerta extremo (já ultrapassou o limite)
+    else if (rsi < limite.pullback) {
+      const excesso = limite.pullback - rsi;
+      alertaPullback = {
+        tipo: 'PULLBACK_EXTREMO',
+        mensagem: `🚨 [EXTREMO] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - EXTREMA SOBREVENDA (${excesso.toFixed(0)} pontos abaixo do limite)! Pullback FORTE iminente!`,
+        acao: 'AGUARDAR_RETOMADA_OBRIGATORIO',
+        nivel: 'EXTREMO',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        excesso: excesso,
+        tempo_estimado: 'imediato'
+      };
+    }
+  }
+  
+  // 🔥 DETECÇÃO RÁPIDA PARA CALL (sobrecompra)
+  else if (primarySignal === 'CALL') {
+    // Nível 1: Alerta preventivo
+    if (rsi > limite.sobrecompra - 12 && rsi <= limite.sobrecompra - 5) {
+      alertaPullback = {
+        tipo: 'PULLBACK_PREVENTIVO',
+        mensagem: `⚠️ [PREVENTIVO] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - aproximando da sobrecompra (${limite.sobrecompra}). Pullback em breve!`,
+        acao: 'PREPARAR_PULLBACK',
+        nivel: 'PREVENTIVO',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        distancia_limite: limite.sobrecompra - rsi,
+        tempo_estimado: 'próximos 1-3 candles'
+      };
+    }
+    // Nível 2: Alerta iminente
+    else if (rsi > limite.sobrecompra - 5 && rsi <= limite.sobrecompra) {
+      alertaPullback = {
+        tipo: 'PULLBACK_IMINENTE',
+        mensagem: `⚠️ [IMINENTE] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - ZONA DE SOBRECOMPRA! Pullback iminente a qualquer momento!`,
+        acao: 'AGUARDAR_RETOMADA',
+        nivel: 'IMINENTE',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        distancia_limite: limite.sobrecompra - rsi,
+        tempo_estimado: 'próximo candle'
+      };
+    }
+    // Nível 3: Alerta extremo
+    else if (rsi > limite.sobrecompra) {
+      const excesso = rsi - limite.sobrecompra;
+      alertaPullback = {
+        tipo: 'PULLBACK_EXTREMO',
+        mensagem: `🚨 [EXTREMO] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - EXTREMA SOBRECOMPRA (${excesso.toFixed(0)} pontos acima do limite)! Pullback FORTE iminente!`,
+        acao: 'AGUARDAR_RETOMADA_OBRIGATORIO',
+        nivel: 'EXTREMO',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        excesso: excesso,
+        tempo_estimado: 'imediato'
+      };
+    }
   }
 
-  if (primarySignal === 'CALL' && rsi > limite.sobrecompra) {
-    const nivelAlerta = rsi > (100 - limite.extremo) ? 'EXTREMO' : 'ALERTA';
-    alertaPullback = {
-      tipo: 'PULLBACK_IMINENTE',
-      mensagem: `⚠️ RSI ${timeframeLabel} em ${rsi.toFixed(0)} (sobrecompra ${limite.descricao}) - Pullback iminente! Aguarde retomada da alta.`,
-      acao: 'AGUARDAR_RETOMADA',
-      nivel: nivelAlerta,
-      tipo_ativo: tipoAtivo,
-      limite_sobrecompra: limite.sobrecompra
-    };
+  // Log para debug (opcional)
+  if (alertaPullback) {
+    console.log(`🔔 ${timeframeLabel} - ${alertaPullback.nivel}: RSI=${rsi.toFixed(0)} | ${alertaPullback.mensagem.substring(0, 80)}...`);
   }
 
   return alertaPullback;
 }
 
-// ========== TIMING M1 (SNIPER) ==========
+// ========== TIMING M1 (SNIPER) - VERSÃO CORRIGIDA ==========
 function calcularTimingM1(m1Analysis, primarySignal) {
   if (!m1Analysis || primarySignal === 'HOLD') {
     return {
@@ -531,22 +600,24 @@ function calcularTimingM1(m1Analysis, primarySignal) {
 
   const adx = m1Analysis.adx || 0;
   const rsi = m1Analysis.rsi || 50;
-  const temTendenciaForte = adx >= 25;
+  const temTendencia = adx >= 22; // 🔧 REDUZIDO de 25 para 22
 
   // ⚡ ALERTA DE PULLBACK M1
   const tipoAtivo = m1Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M1');
 
   if (primarySignal === 'CALL') {
-    if (m1Analysis.sinal === 'CALL' && rsi < 65 && temTendenciaForte) {
+    // Condição 1: Confirmação com tendência
+    if (m1Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) { // 🔧 Aumentado de 65 para 75
       return {
         permitido: true,
-        motivo: `M1 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
+        motivo: `M1 confirmando CALL com tendência (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m1Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
     }
-    else if (m1Analysis.sinal === 'CALL' && rsi < 65) {
+    // Condição 2: Confirmação simples (sem tendência)
+    else if (m1Analysis.sinal === 'CALL' && rsi < 75) { // 🔧 Aumentado de 65 para 75
       return {
         permitido: true,
         motivo: `M1 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
@@ -554,10 +625,20 @@ function calcularTimingM1(m1Analysis, primarySignal) {
         alerta_pullback: alertaPullback
       };
     }
-    else if (m1Analysis.sinal === 'PUT' && rsi < 30) {
+    // Condição 3: Reversão por oversold
+    else if (m1Analysis.sinal === 'PUT' && rsi < 38) { // 🔧 Aumentado de 30 para 38
       return {
         permitido: true,
         motivo: `M1 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    // Condição 4: Momentum de tendência
+    else if (temTendencia && m1Analysis.sinal === 'CALL') {
+      return {
+        permitido: true,
+        motivo: `M1 em tendência de CALL (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m1Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
@@ -572,15 +653,17 @@ function calcularTimingM1(m1Analysis, primarySignal) {
     }
   }
   else if (primarySignal === 'PUT') {
-    if (m1Analysis.sinal === 'PUT' && rsi > 35 && temTendenciaForte) {
+    // Condição 1: Confirmação com tendência
+    if (m1Analysis.sinal === 'PUT' && rsi > 25 && temTendencia) { // 🔧 Reduzido de 35 para 25
       return {
         permitido: true,
-        motivo: `M1 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
+        motivo: `M1 confirmando PUT com tendência (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m1Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
     }
-    else if (m1Analysis.sinal === 'PUT' && rsi > 35) {
+    // Condição 2: Confirmação simples (sem tendência)
+    else if (m1Analysis.sinal === 'PUT' && rsi > 25) { // 🔧 Reduzido de 35 para 25
       return {
         permitido: true,
         motivo: `M1 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
@@ -588,10 +671,20 @@ function calcularTimingM1(m1Analysis, primarySignal) {
         alerta_pullback: alertaPullback
       };
     }
-    else if (m1Analysis.sinal === 'CALL' && rsi > 70) {
+    // Condição 3: Reversão por overbought
+    else if (m1Analysis.sinal === 'CALL' && rsi > 62) { // 🔧 Reduzido de 70 para 62
       return {
         permitido: true,
         motivo: `M1 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    // Condição 4: Momentum de tendência
+    else if (temTendencia && m1Analysis.sinal === 'PUT') {
+      return {
+        permitido: true,
+        motivo: `M1 em tendência de PUT (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m1Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
@@ -614,7 +707,7 @@ function calcularTimingM1(m1Analysis, primarySignal) {
   };
 }
 
-// ========== TIMING M5 (CAÇADOR) ==========
+// ========== TIMING M5 (CAÇADOR) - VERSÃO CORRIGIDA ==========
 function calcularTimingM5(m5Analysis, primarySignal) {
   if (!m5Analysis || primarySignal === 'HOLD') {
     return {
@@ -629,22 +722,24 @@ function calcularTimingM5(m5Analysis, primarySignal) {
 
   const adx = m5Analysis.adx || 0;
   const rsi = m5Analysis.rsi || 50;
-  const temTendenciaForte = adx >= 25;
+  const temTendencia = adx >= 22; // 🔧 REDUZIDO de 25 para 22
 
   // ⚡ ALERTA DE PULLBACK M5
   const tipoAtivo = m5Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M5');
 
   if (primarySignal === 'CALL') {
-    if (m5Analysis.sinal === 'CALL' && rsi < 65 && temTendenciaForte) {
+    // Condição 1: Confirmação com tendência
+    if (m5Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) { // 🔧 Aumentado de 65 para 75
       return {
         permitido: true,
-        motivo: `M5 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
+        motivo: `M5 confirmando CALL com tendência (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m5Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
     }
-    else if (m5Analysis.sinal === 'CALL' && rsi < 65) {
+    // Condição 2: Confirmação simples (sem tendência)
+    else if (m5Analysis.sinal === 'CALL' && rsi < 75) { // 🔧 Aumentado de 65 para 75
       return {
         permitido: true,
         motivo: `M5 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
@@ -652,10 +747,20 @@ function calcularTimingM5(m5Analysis, primarySignal) {
         alerta_pullback: alertaPullback
       };
     }
-    else if (m5Analysis.sinal === 'PUT' && rsi < 30) {
+    // Condição 3: Reversão por oversold
+    else if (m5Analysis.sinal === 'PUT' && rsi < 38) { // 🔧 Aumentado de 30 para 38
       return {
         permitido: true,
         motivo: `M5 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    // Condição 4: Momentum de tendência
+    else if (temTendencia && m5Analysis.sinal === 'CALL') {
+      return {
+        permitido: true,
+        motivo: `M5 em tendência de CALL (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m5Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
@@ -670,15 +775,17 @@ function calcularTimingM5(m5Analysis, primarySignal) {
     }
   }
   else if (primarySignal === 'PUT') {
-    if (m5Analysis.sinal === 'PUT' && rsi > 35 && temTendenciaForte) {
+    // Condição 1: Confirmação com tendência
+    if (m5Analysis.sinal === 'PUT' && rsi > 25 && temTendencia) { // 🔧 Reduzido de 35 para 25
       return {
         permitido: true,
-        motivo: `M5 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
+        motivo: `M5 confirmando PUT com tendência (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m5Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
     }
-    else if (m5Analysis.sinal === 'PUT' && rsi > 35) {
+    // Condição 2: Confirmação simples (sem tendência)
+    else if (m5Analysis.sinal === 'PUT' && rsi > 25) { // 🔧 Reduzido de 35 para 25
       return {
         permitido: true,
         motivo: `M5 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
@@ -686,10 +793,20 @@ function calcularTimingM5(m5Analysis, primarySignal) {
         alerta_pullback: alertaPullback
       };
     }
-    else if (m5Analysis.sinal === 'CALL' && rsi > 70) {
+    // Condição 3: Reversão por overbought
+    else if (m5Analysis.sinal === 'CALL' && rsi > 62) { // 🔧 Reduzido de 70 para 62
       return {
         permitido: true,
         motivo: `M5 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    // Condição 4: Momentum de tendência
+    else if (temTendencia && m5Analysis.sinal === 'PUT') {
+      return {
+        permitido: true,
+        motivo: `M5 em tendência de PUT (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m5Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
@@ -712,7 +829,7 @@ function calcularTimingM5(m5Analysis, primarySignal) {
   };
 }
 
-// ========== TIMING M15 (PESCADOR) ==========
+// ========== TIMING M15 (PESCADOR) - VERSÃO CORRIGIDA ==========
 function calcularTimingM15(m15Analysis, primarySignal) {
   if (!m15Analysis || primarySignal === 'HOLD') {
     return {
@@ -727,22 +844,24 @@ function calcularTimingM15(m15Analysis, primarySignal) {
 
   const adx = m15Analysis.adx || 0;
   const rsi = m15Analysis.rsi || 50;
-  const temTendenciaForte = adx >= 25;
+  const temTendencia = adx >= 22; // 🔧 REDUZIDO de 25 para 22
 
   // ⚡ ALERTA DE PULLBACK M15
   const tipoAtivo = m15Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M15');
 
   if (primarySignal === 'CALL') {
-    if (m15Analysis.sinal === 'CALL' && rsi < 65 && temTendenciaForte) {
+    // Condição 1: Confirmação com tendência
+    if (m15Analysis.sinal === 'CALL' && rsi < 72 && temTendencia) { // 🔧 Aumentado de 65 para 72
       return {
         permitido: true,
-        motivo: `M15 confirmando CALL com tendência forte (ADX ${adx.toFixed(0)})`,
+        motivo: `M15 confirmando CALL com tendência (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m15Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
     }
-    else if (m15Analysis.sinal === 'CALL' && rsi < 65) {
+    // Condição 2: Confirmação simples (sem tendência)
+    else if (m15Analysis.sinal === 'CALL' && rsi < 72) { // 🔧 Aumentado de 65 para 72
       return {
         permitido: true,
         motivo: `M15 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
@@ -750,10 +869,20 @@ function calcularTimingM15(m15Analysis, primarySignal) {
         alerta_pullback: alertaPullback
       };
     }
-    else if (m15Analysis.sinal === 'PUT' && rsi < 30) {
+    // Condição 3: Reversão por oversold
+    else if (m15Analysis.sinal === 'PUT' && rsi < 36) { // 🔧 Aumentado de 30 para 36
       return {
         permitido: true,
         motivo: `M15 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    // Condição 4: Momentum de tendência
+    else if (temTendencia && m15Analysis.sinal === 'CALL') {
+      return {
+        permitido: true,
+        motivo: `M15 em tendência de CALL (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m15Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
@@ -768,15 +897,17 @@ function calcularTimingM15(m15Analysis, primarySignal) {
     }
   }
   else if (primarySignal === 'PUT') {
-    if (m15Analysis.sinal === 'PUT' && rsi > 35 && temTendenciaForte) {
+    // Condição 1: Confirmação com tendência
+    if (m15Analysis.sinal === 'PUT' && rsi > 28 && temTendencia) { // 🔧 Reduzido de 35 para 28
       return {
         permitido: true,
-        motivo: `M15 confirmando PUT com tendência forte (ADX ${adx.toFixed(0)})`,
+        motivo: `M15 confirmando PUT com tendência (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m15Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
     }
-    else if (m15Analysis.sinal === 'PUT' && rsi > 35) {
+    // Condição 2: Confirmação simples (sem tendência)
+    else if (m15Analysis.sinal === 'PUT' && rsi > 28) { // 🔧 Reduzido de 35 para 28
       return {
         permitido: true,
         motivo: `M15 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
@@ -784,10 +915,20 @@ function calcularTimingM15(m15Analysis, primarySignal) {
         alerta_pullback: alertaPullback
       };
     }
-    else if (m15Analysis.sinal === 'CALL' && rsi > 70) {
+    // Condição 3: Reversão por overbought
+    else if (m15Analysis.sinal === 'CALL' && rsi > 65) { // 🔧 Reduzido de 70 para 65
       return {
         permitido: true,
         motivo: `M15 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    // Condição 4: Momentum de tendência
+    else if (temTendencia && m15Analysis.sinal === 'PUT') {
+      return {
+        permitido: true,
+        motivo: `M15 em tendência de PUT (ADX ${adx.toFixed(0)})`,
         rsi, sinal: m15Analysis.sinal, adx,
         alerta_pullback: alertaPullback
       };
@@ -1181,7 +1322,7 @@ console.log(`📊 Configuração de candles: 400 para todos os timeframes (igual
 console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança`);
 console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
 console.log(`⚡ Busca e análise de timeframes em paralelo (Promise.all)`);
-console.log(`🔔 Alerta de pullback ativo em M1, M5 e M15`);
+console.log(`🔔 Alerta de pullback ativo em M1, M5 e M15 (com detecção rápida - PREVENTIVO/IMINENTE/EXTREMO)`);
 
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
