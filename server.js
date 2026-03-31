@@ -531,13 +531,14 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
 }
 
 function calcularTimingM1(m1Analysis, primarySignal) {
-  if (!m1Analysis || primarySignal === 'HOLD') {
+  // Validação básica
+  if (!m1Analysis) {
     return {
       permitido: false,
       motivo: 'M1 não disponível',
-      rsi: m1Analysis?.rsi || null,
-      sinal: m1Analysis?.sinal || null,
-      adx: m1Analysis?.adx || null,
+      rsi: null,
+      sinal: null,
+      adx: null,
       alerta_pullback: null
     };
   }
@@ -546,9 +547,23 @@ function calcularTimingM1(m1Analysis, primarySignal) {
   const rsi = m1Analysis.rsi || 50;
   const temTendencia = adx >= 22;
 
+  // ⚡ ALERTA DE PULLBACK M1 - GERADO SEMPRE, INDEPENDENTE DO primarySignal!
   const tipoAtivo = m1Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M1');
 
+  // Se primarySignal é HOLD, retorna apenas o alerta sem permitir entrada
+  if (primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'Sinal principal HOLD - aguardar definição',
+      rsi: rsi,
+      sinal: m1Analysis.sinal,
+      adx: adx,
+      alerta_pullback: alertaPullback  // ← AGORA INCLUI O ALERTA!
+    };
+  }
+
+  // Resto do código para quando primarySignal é CALL ou PUT
   if (primarySignal === 'CALL') {
     if (m1Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) {
       return {
@@ -643,13 +658,14 @@ function calcularTimingM1(m1Analysis, primarySignal) {
 }
 
 function calcularTimingM5(m5Analysis, primarySignal) {
-  if (!m5Analysis || primarySignal === 'HOLD') {
+  // Validação básica
+  if (!m5Analysis) {
     return {
       permitido: false,
       motivo: 'M5 não disponível',
-      rsi: m5Analysis?.rsi || null,
-      sinal: m5Analysis?.sinal || null,
-      adx: m5Analysis?.adx || null,
+      rsi: null,
+      sinal: null,
+      adx: null,
       alerta_pullback: null
     };
   }
@@ -658,9 +674,23 @@ function calcularTimingM5(m5Analysis, primarySignal) {
   const rsi = m5Analysis.rsi || 50;
   const temTendencia = adx >= 22;
 
+  // ⚡ ALERTA DE PULLBACK M5 - GERADO SEMPRE, INDEPENDENTE DO primarySignal!
   const tipoAtivo = m5Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M5');
 
+  // Se primarySignal é HOLD, retorna apenas o alerta sem permitir entrada
+  if (primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'Sinal principal HOLD - aguardar definição',
+      rsi: rsi,
+      sinal: m5Analysis.sinal,
+      adx: adx,
+      alerta_pullback: alertaPullback  // ← AGORA INCLUI O ALERTA!
+    };
+  }
+
+  // Resto do código para quando primarySignal é CALL ou PUT
   if (primarySignal === 'CALL') {
     if (m5Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) {
       return {
