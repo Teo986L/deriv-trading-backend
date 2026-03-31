@@ -489,12 +489,36 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
   const limite = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
   let alertaPullback = null;
 
-  // ========== NOVA LÓGICA: Detecta pullback independente do primarySignal ==========
-  
-  // 1. DETECÇÃO PARA SOBREVENDA (RSI BAIXO) - independente do sinal
-  if (rsi < limite.pullback) {
-    // Nível 3: EXTREMO (já ultrapassou o limite)
-    if (rsi < limite.extremo) {
+  // 🔥 DETECÇÃO RÁPIDA PARA PUT (sobrevenda)
+  if (primarySignal === 'PUT') {
+    // Nível 1: Alerta preventivo (quando está se aproximando)
+    if (rsi < limite.pullback + 12 && rsi >= limite.pullback + 5) {
+      alertaPullback = {
+        tipo: 'PULLBACK_PREVENTIVO',
+        mensagem: `⚠️ [PREVENTIVO] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - aproximando da sobrevenda (${limite.pullback}). Pullback em breve!`,
+        acao: 'PREPARAR_PULLBACK',
+        nivel: 'PREVENTIVO',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        distancia_limite: rsi - limite.pullback,
+        tempo_estimado: 'próximos 1-3 candles'
+      };
+    }
+    // Nível 2: Alerta iminente (quando está quase no limite)
+    else if (rsi < limite.pullback + 5 && rsi >= limite.pullback) {
+      alertaPullback = {
+        tipo: 'PULLBACK_IMINENTE',
+        mensagem: `⚠️ [IMINENTE] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - ZONA DE SOBREVENDA! Pullback iminente a qualquer momento!`,
+        acao: 'AGUARDAR_RETOMADA',
+        nivel: 'IMINENTE',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        distancia_limite: rsi - limite.pullback,
+        tempo_estimado: 'próximo candle'
+      };
+    }
+    // Nível 3: Alerta extremo (já ultrapassou o limite)
+    else if (rsi < limite.pullback) {
       const excesso = limite.pullback - rsi;
       alertaPullback = {
         tipo: 'PULLBACK_EXTREMO',
@@ -507,24 +531,38 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
         tempo_estimado: 'imediato'
       };
     }
-    // Nível 2: IMINENTE (quase no limite)
-    else if (rsi >= limite.extremo && rsi < limite.pullback) {
+  }
+  
+  // 🔥 DETECÇÃO RÁPIDA PARA CALL (sobrecompra)
+  else if (primarySignal === 'CALL') {
+    // Nível 1: Alerta preventivo
+    if (rsi > limite.sobrecompra - 12 && rsi <= limite.sobrecompra - 5) {
+      alertaPullback = {
+        tipo: 'PULLBACK_PREVENTIVO',
+        mensagem: `⚠️ [PREVENTIVO] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - aproximando da sobrecompra (${limite.sobrecompra}). Pullback em breve!`,
+        acao: 'PREPARAR_PULLBACK',
+        nivel: 'PREVENTIVO',
+        tipo_ativo: tipoAtivo,
+        rsi_atual: rsi,
+        distancia_limite: limite.sobrecompra - rsi,
+        tempo_estimado: 'próximos 1-3 candles'
+      };
+    }
+    // Nível 2: Alerta iminente
+    else if (rsi > limite.sobrecompra - 5 && rsi <= limite.sobrecompra) {
       alertaPullback = {
         tipo: 'PULLBACK_IMINENTE',
-        mensagem: `⚠️ [IMINENTE] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - ZONA DE SOBREVENDA! Pullback iminente a qualquer momento!`,
+        mensagem: `⚠️ [IMINENTE] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - ZONA DE SOBRECOMPRA! Pullback iminente a qualquer momento!`,
         acao: 'AGUARDAR_RETOMADA',
         nivel: 'IMINENTE',
         tipo_ativo: tipoAtivo,
         rsi_atual: rsi,
-        distancia_limite: rsi - limite.pullback,
+        distancia_limite: limite.sobrecompra - rsi,
         tempo_estimado: 'próximo candle'
       };
     }
-  }
-  // 2. DETECÇÃO PARA SOBRECOMPRA (RSI ALTO) - independente do sinal
-  else if (rsi > limite.sobrecompra) {
-    // Nível 3: EXTREMO
-    if (rsi > limite.sobrecompra + 5) {
+    // Nível 3: Alerta extremo
+    else if (rsi > limite.sobrecompra) {
       const excesso = rsi - limite.sobrecompra;
       alertaPullback = {
         tipo: 'PULLBACK_EXTREMO',
@@ -537,51 +575,9 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
         tempo_estimado: 'imediato'
       };
     }
-    // Nível 2: IMINENTE
-    else if (rsi <= limite.sobrecompra + 5 && rsi > limite.sobrecompra) {
-      alertaPullback = {
-        tipo: 'PULLBACK_IMINENTE',
-        mensagem: `⚠️ [IMINENTE] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - ZONA DE SOBRECOMPRA! Pullback iminente a qualquer momento!`,
-        acao: 'AGUARDAR_RETOMADA',
-        nivel: 'IMINENTE',
-        tipo_ativo: tipoAtivo,
-        rsi_atual: rsi,
-        distancia_limite: limite.sobrecompra - rsi,
-        tempo_estimado: 'próximo candle'
-      };
-    }
-  }
-  // 3. DETECÇÃO PREVENTIVA (aproximando das zonas críticas)
-  else {
-    // PREVENTIVO para SOBREVENDA (está chegando perto)
-    if (rsi < limite.pullback + 12 && rsi >= limite.pullback) {
-      alertaPullback = {
-        tipo: 'PULLBACK_PREVENTIVO',
-        mensagem: `⚠️ [PREVENTIVO] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - aproximando da sobrevenda (${limite.pullback}). Pullback em breve!`,
-        acao: 'PREPARAR_PULLBACK',
-        nivel: 'PREVENTIVO',
-        tipo_ativo: tipoAtivo,
-        rsi_atual: rsi,
-        distancia_limite: rsi - limite.pullback,
-        tempo_estimado: 'próximos 1-3 candles'
-      };
-    }
-    // PREVENTIVO para SOBRECOMPRA (está chegando perto)
-    else if (rsi > limite.sobrecompra - 12 && rsi <= limite.sobrecompra) {
-      alertaPullback = {
-        tipo: 'PULLBACK_PREVENTIVO',
-        mensagem: `⚠️ [PREVENTIVO] RSI ${timeframeLabel} em ${rsi.toFixed(0)} - aproximando da sobrecompra (${limite.sobrecompra}). Pullback em breve!`,
-        acao: 'PREPARAR_PULLBACK',
-        nivel: 'PREVENTIVO',
-        tipo_ativo: tipoAtivo,
-        rsi_atual: rsi,
-        distancia_limite: limite.sobrecompra - rsi,
-        tempo_estimado: 'próximos 1-3 candles'
-      };
-    }
   }
 
-  // Log para debug
+  // Log para debug (opcional)
   if (alertaPullback) {
     console.log(`🔔 ${timeframeLabel} - ${alertaPullback.nivel}: RSI=${rsi.toFixed(0)} | ${alertaPullback.mensagem.substring(0, 80)}...`);
   }
