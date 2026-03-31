@@ -755,13 +755,14 @@ function calcularTimingM5(m5Analysis, primarySignal) {
 }
 
 function calcularTimingM15(m15Analysis, primarySignal) {
-  if (!m15Analysis || primarySignal === 'HOLD') {
+  // Validação básica
+  if (!m15Analysis) {
     return {
       permitido: false,
       motivo: 'M15 não disponível',
-      rsi: m15Analysis?.rsi || null,
-      sinal: m15Analysis?.sinal || null,
-      adx: m15Analysis?.adx || null,
+      rsi: null,
+      sinal: null,
+      adx: null,
       alerta_pullback: null
     };
   }
@@ -770,9 +771,23 @@ function calcularTimingM15(m15Analysis, primarySignal) {
   const rsi = m15Analysis.rsi || 50;
   const temTendencia = adx >= 22;
 
+  // ⚡ ALERTA DE PULLBACK M15 - GERADO SEMPRE, INDEPENDENTE DO primarySignal!
   const tipoAtivo = m15Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M15');
 
+  // Se primarySignal é HOLD, retorna apenas o alerta sem permitir entrada
+  if (primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'Sinal principal HOLD - aguardar definição',
+      rsi: rsi,
+      sinal: m15Analysis.sinal,
+      adx: adx,
+      alerta_pullback: alertaPullback  // ← AGORA INCLUI O ALERTA!
+    };
+  }
+
+  // Resto do código para quando primarySignal é CALL ou PUT
   if (primarySignal === 'CALL') {
     if (m15Analysis.sinal === 'CALL' && rsi < 72 && temTendencia) {
       return {
