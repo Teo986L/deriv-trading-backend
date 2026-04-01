@@ -531,7 +531,6 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
 }
 
 function calcularTimingM1(m1Analysis, primarySignal) {
-  // Validação básica
   if (!m1Analysis) {
     return {
       permitido: false,
@@ -547,11 +546,9 @@ function calcularTimingM1(m1Analysis, primarySignal) {
   const rsi = m1Analysis.rsi || 50;
   const temTendencia = adx >= 22;
 
-  // ⚡ ALERTA DE PULLBACK M1 - GERADO SEMPRE, INDEPENDENTE DO primarySignal!
   const tipoAtivo = m1Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M1');
 
-  // Se primarySignal é HOLD, retorna apenas o alerta sem permitir entrada
   if (primarySignal === 'HOLD') {
     return {
       permitido: false,
@@ -559,11 +556,10 @@ function calcularTimingM1(m1Analysis, primarySignal) {
       rsi: rsi,
       sinal: m1Analysis.sinal,
       adx: adx,
-      alerta_pullback: alertaPullback  // ← AGORA INCLUI O ALERTA!
+      alerta_pullback: alertaPullback
     };
   }
 
-  // Resto do código para quando primarySignal é CALL ou PUT
   if (primarySignal === 'CALL') {
     if (m1Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) {
       return {
@@ -658,7 +654,6 @@ function calcularTimingM1(m1Analysis, primarySignal) {
 }
 
 function calcularTimingM5(m5Analysis, primarySignal) {
-  // Validação básica
   if (!m5Analysis) {
     return {
       permitido: false,
@@ -674,11 +669,9 @@ function calcularTimingM5(m5Analysis, primarySignal) {
   const rsi = m5Analysis.rsi || 50;
   const temTendencia = adx >= 22;
 
-  // ⚡ ALERTA DE PULLBACK M5 - GERADO SEMPRE, INDEPENDENTE DO primarySignal!
   const tipoAtivo = m5Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M5');
 
-  // Se primarySignal é HOLD, retorna apenas o alerta sem permitir entrada
   if (primarySignal === 'HOLD') {
     return {
       permitido: false,
@@ -686,11 +679,10 @@ function calcularTimingM5(m5Analysis, primarySignal) {
       rsi: rsi,
       sinal: m5Analysis.sinal,
       adx: adx,
-      alerta_pullback: alertaPullback  // ← AGORA INCLUI O ALERTA!
+      alerta_pullback: alertaPullback
     };
   }
 
-  // Resto do código para quando primarySignal é CALL ou PUT
   if (primarySignal === 'CALL') {
     if (m5Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) {
       return {
@@ -785,7 +777,6 @@ function calcularTimingM5(m5Analysis, primarySignal) {
 }
 
 function calcularTimingM15(m15Analysis, primarySignal) {
-  // Validação básica
   if (!m15Analysis) {
     return {
       permitido: false,
@@ -801,11 +792,9 @@ function calcularTimingM15(m15Analysis, primarySignal) {
   const rsi = m15Analysis.rsi || 50;
   const temTendencia = adx >= 22;
 
-  // ⚡ ALERTA DE PULLBACK M15 - GERADO SEMPRE, INDEPENDENTE DO primarySignal!
   const tipoAtivo = m15Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M15');
 
-  // Se primarySignal é HOLD, retorna apenas o alerta sem permitir entrada
   if (primarySignal === 'HOLD') {
     return {
       permitido: false,
@@ -813,11 +802,10 @@ function calcularTimingM15(m15Analysis, primarySignal) {
       rsi: rsi,
       sinal: m15Analysis.sinal,
       adx: adx,
-      alerta_pullback: alertaPullback  // ← AGORA INCLUI O ALERTA!
+      alerta_pullback: alertaPullback
     };
   }
 
-  // Resto do código para quando primarySignal é CALL ou PUT
   if (primarySignal === 'CALL') {
     if (m15Analysis.sinal === 'CALL' && rsi < 72 && temTendencia) {
       return {
@@ -907,6 +895,63 @@ function calcularTimingM15(m15Analysis, primarySignal) {
     permitido: false,
     motivo: 'Sinal principal neutro',
     rsi, sinal: m15Analysis.sinal, adx,
+    alerta_pullback: alertaPullback
+  };
+}
+
+// ========== FUNÇÕES ADICIONADAS: TIMING H1 E H4 (APENAS ALERTAS) ==========
+function calcularTimingH1(h1Analysis, primarySignal) {
+  if (!h1Analysis) {
+    return {
+      permitido: false,
+      motivo: 'H1 não disponível',
+      rsi: null,
+      sinal: null,
+      adx: null,
+      alerta_pullback: null
+    };
+  }
+
+  const adx = h1Analysis.adx || 0;
+  const rsi = h1Analysis.rsi || 50;
+
+  const tipoAtivo = h1Analysis.tipo_ativo || 'indice_normal';
+  const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'H1');
+
+  return {
+    permitido: false,
+    motivo: 'H1 é timeframe de tendência',
+    rsi: rsi,
+    sinal: h1Analysis.sinal,
+    adx: adx,
+    alerta_pullback: alertaPullback
+  };
+}
+
+function calcularTimingH4(h4Analysis, primarySignal) {
+  if (!h4Analysis) {
+    return {
+      permitido: false,
+      motivo: 'H4 não disponível',
+      rsi: null,
+      sinal: null,
+      adx: null,
+      alerta_pullback: null
+    };
+  }
+
+  const adx = h4Analysis.adx || 0;
+  const rsi = h4Analysis.rsi || 50;
+
+  const tipoAtivo = h4Analysis.tipo_ativo || 'indice_normal';
+  const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'H4');
+
+  return {
+    permitido: false,
+    motivo: 'H4 é timeframe de tendência principal',
+    rsi: rsi,
+    sinal: h4Analysis.sinal,
+    adx: adx,
     alerta_pullback: alertaPullback
   };
 }
@@ -1090,6 +1135,7 @@ currentPrice
 );
 
 let m1Timing = null, m5Timing = null, m15Timing = null;
+let h1Timing = null, h4Timing = null;
 const primarySignal = consolidated.simpleMajority.signal;
 
 if (TRADING_MODES[mode].timeframes.includes('M1')) {
@@ -1103,6 +1149,14 @@ m5Timing = calcularTimingM5(m5Analysis, primarySignal);
 if (TRADING_MODES[mode].timeframes.includes('M15')) {
 const m15Analysis = mtfManager.timeframes['M15']?.analysis;
 m15Timing = calcularTimingM15(m15Analysis, primarySignal);
+}
+if (TRADING_MODES[mode].timeframes.includes('H1')) {
+const h1Analysis = mtfManager.timeframes['H1']?.analysis;
+h1Timing = calcularTimingH1(h1Analysis, primarySignal);
+}
+if (TRADING_MODES[mode].timeframes.includes('H4')) {
+const h4Analysis = mtfManager.timeframes['H4']?.analysis;
+h4Timing = calcularTimingH4(h4Analysis, primarySignal);
 }
 
 let timingEspecial = null;
@@ -1205,6 +1259,8 @@ priceSource: priceSource,
 ...(m1Timing && { m1_timing: m1Timing }),
 ...(m5Timing && { m5_timing: m5Timing }),
 ...(m15Timing && { m15_timing: m15Timing }),
+...(h1Timing && { h1_timing: h1Timing }),
+...(h4Timing && { h4_timing: h4Timing }),
 tipo_ativo: consolidated.tipo_ativo,
 config_ativo: consolidated.config_ativo,
 ciclo_completo: consolidated.ciclo_completo,
@@ -1269,7 +1325,7 @@ console.log(`📊 Configuração de candles: 400 para todos os timeframes (igual
 console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança`);
 console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
 console.log(`⚡ Busca e análise de timeframes em paralelo (Promise.all)`);
-console.log(`🔔 Alerta de pullback ativo em M1, M5 e M15 (com detecção rápida - PREVENTIVO/IMINENTE/EXTREMO)`);
+console.log(`🔔 Alerta de pullback ativo em M1, M5, M15, H1 e H4 (com detecção rápida - PREVENTIVO/IMINENTE/EXTREMO)`);
 
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
