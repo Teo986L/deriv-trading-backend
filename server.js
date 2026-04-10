@@ -1379,7 +1379,7 @@ message: process.env.NODE_ENV === 'development' ? err.message : undefined
 
 const PORT = process.env.PORT || 3000;
 
-const server = app.listen(PORT, async () => {
+const server = app.listen(PORT, '0.0.0.0', async () => {
 console.log(`\n🚀 Servidor rodando na porta ${PORT}`);
 console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
 console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
@@ -1397,6 +1397,12 @@ console.log('✅ Conexão persistente estabelecida e mantida');
 console.error('❌ Falha ao estabelecer conexão persistente:', err);
 }
 });
+
+// 🔧 CORREÇÃO PARA ERRO 502 BAD GATEWAY NO RENDER
+// Aumenta os timeouts de keep-alive para evitar que o Node.js feche conexões
+// antes do proxy do Render, causando 502 intermitentes.
+server.keepAliveTimeout = 120000; // 120 segundos (recomendado pelo Render)
+server.headersTimeout = 120000;    // 120 segundos
 
 process.on('SIGTERM', () => {
 console.log('\n🛑 Recebido SIGTERM, encerrando conexões...');
