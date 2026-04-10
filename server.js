@@ -418,6 +418,68 @@ userId: finalUserId
 });
 });
 
+// ═══════════════════════════════════════════════════════
+// NOVA ROTA: REINICIAR SERVIÇO RENDER
+// ═══════════════════════════════════════════════════════
+app.post('/api/admin/restart-render', adminLimiter, async (req, res) => {
+  try {
+    const { adminKey } = req.body;
+    
+    // Validar chave de administrador
+    if (!adminKey || adminKey !== ADMIN_SECRET) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'Chave de administrador inválida' 
+      });
+    }
+    
+    const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
+    const RENDER_API_KEY = process.env.RENDER_API_KEY;
+    
+    if (!RENDER_SERVICE_ID || !RENDER_API_KEY) {
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Configuração do Render não encontrada no servidor. Verifique as variáveis de ambiente.' 
+      });
+    }
+    
+    console.log(`🔄 Reiniciando serviço Render: ${RENDER_SERVICE_ID}`);
+    
+    const response = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/restart`, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${RENDER_API_KEY}`
+      }
+    });
+    
+    if (response.ok) {
+      console.log(`✅ Serviço Render reiniciado com sucesso`);
+      res.json({ 
+        success: true, 
+        message: 'Serviço Render reiniciado com sucesso! O servidor estará disponível em alguns segundos.' 
+      });
+    } else {
+      const errorText = await response.text();
+      console.error(`❌ Erro Render API (${response.status}):`, errorText);
+      res.status(response.status).json({ 
+        success: false, 
+        error: `Erro ${response.status} da API Render: ${errorText}` 
+      });
+    }
+  } catch (error) {
+    console.error('❌ Erro ao reiniciar Render:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// ROTA EXISTENTE: CONNECTION STATUS
+// ═══════════════════════════════════════════════════════
+
 app.get('/api/connection-status', authenticateToken, (req, res) => {
 if (!derivClient) {
 return res.json({ status: 'not_initialized' });
