@@ -135,11 +135,11 @@ return modeATRMap[mode] || 'M5';
 // para estabilizar. O excedente ficava parado em memória sem uso algum.
 // Com 150 candles: ~30 de aquecimento + 120 efetivamente usados = resultados idênticos.
 const ALL_TIMEFRAMES_CONFIG = {
-'M1':  { key: 'M1',  seconds: 60,    candleCount: 200, minRequired: 100 },
+'M1':  { key: 'M1',  seconds: 60,    candleCount: 150, minRequired: 50 },
 'M5':  { key: 'M5',  seconds: 300,   candleCount: 150, minRequired: 50 },
-'M15': { key: 'M15', seconds: 900,   candleCount: 150, minRequired: 100 },
+'M15': { key: 'M15', seconds: 900,   candleCount: 150, minRequired: 50 },
 'M30': { key: 'M30', seconds: 1800,  candleCount: 120, minRequired: 50 },
-'H1':  { key: 'H1',  seconds: 3600,  candleCount: 100, minRequired: 100 },
+'H1':  { key: 'H1',  seconds: 3600,  candleCount: 100, minRequired: 50 },
 'H4':  { key: 'H4',  seconds: 14400, candleCount: 80,  minRequired: 30 },
 'H24': { key: 'H24', seconds: 86400, candleCount: 60,  minRequired: 20 }
 };
@@ -1171,6 +1171,12 @@ break;
 
 console.log(`⚡ Analisando ${timeframesToAnalyze.length} timeframes em paralelo`);
 
+// FIX PERFORMANCE: Lançar tick ANTES da análise começar.
+// O tick corre em paralelo com toda a análise (~2-3s).
+// Quando chegar ao await tickPromise, já estará resolvido (ou em timeout),
+// eliminando os 1500ms bloqueantes que causavam lentidão em todos os ativos.
+const tickPromise = getCurrentPrice(client, symbol);
+
 await Promise.all(
 timeframesToAnalyze.map(async (tf) => {
 try {
@@ -1233,7 +1239,8 @@ consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 let currentPrice = 0;
 let priceSource = 'unknown';
 
-const tickResult = await getCurrentPrice(client, symbol);
+// Recolher resultado do tick — já estava a correr em paralelo com a análise
+const tickResult = await tickPromise;
 if (tickResult) {
 currentPrice = tickResult;
 priceSource = 'tick';
