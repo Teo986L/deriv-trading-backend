@@ -1224,10 +1224,10 @@ const liquidityResult = detectLiquiditySweepRobusto({
 console.log(`💧 Liquidez detectada: ${liquidityResult.sweepDetected ? `${liquidityResult.direction} (${liquidityResult.confidence.toFixed(0)}%)` : 'Nenhum sweep relevante'}`);
 
 // (Opcional) Sobrescrever sinal principal se liquidez for muito forte
-if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75) {
+if (liquidityResult.sweepDetected && liquidityResult.confidence >= 65) {
     console.log(`⚠️ Sinal de liquidez forte (${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%) - substituindo sinal principal`);
     consolidated.signal = liquidityResult.direction;
-    consolidated.confidence = liquidityResult.confidence;
+    consolidated.confidence = liquidityResult.confidence / 100;   // ✅ DIVISÃO POR 100
     consolidated.simpleMajority.signal = liquidityResult.direction;
 }
 // ==============================================
