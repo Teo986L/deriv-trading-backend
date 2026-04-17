@@ -1224,10 +1224,12 @@ const liquidityResult = detectLiquiditySweepRobusto({
 console.log(`💧 Liquidez detectada: ${liquidityResult.sweepDetected ? `${liquidityResult.direction} (${liquidityResult.confidence.toFixed(0)}%)` : 'Nenhum sweep relevante'}`);
 
 // (Opcional) Sobrescrever sinal principal se liquidez for muito forte
-if (liquidityResult.sweepDetected && liquidityResult.confidence >= 65) {
+// NOVA REGRA: Só substitui se NÃO houver divergência de timeframes (callCount == 0 ou putCount == 0)
+const hasDivergence = (agreement.callCount > 0 && agreement.putCount > 0);
+if (liquidityResult.sweepDetected && liquidityResult.confidence >= 70 && !hasDivergence) {
     console.log(`⚠️ Sinal de liquidez forte (${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%) - substituindo sinal principal`);
     consolidated.signal = liquidityResult.direction;
-    consolidated.confidence = liquidityResult.confidence / 100;   // ✅ DIVISÃO POR 100
+    consolidated.confidence = liquidityResult.confidence / 100;
     consolidated.simpleMajority.signal = liquidityResult.direction;
 }
 // ==============================================
