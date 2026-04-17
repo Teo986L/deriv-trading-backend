@@ -340,6 +340,9 @@ async function getCurrentPrice(client, symbol) {
       }
     };
 
+    // FIX: Timeout aumentado de 800ms para 1500ms.
+    // R_10 e outros índices de volatilidade da Deriv têm latência maior no WS,
+    // causando timeout desnecessário e fallback para preço do candle.
     const timeout = setTimeout(() => {
       if (!settled) {
         console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
@@ -347,7 +350,7 @@ async function getCurrentPrice(client, symbol) {
         cleanup();
         resolve(null);
       }
-    }, 800);
+    }, 1500);
 
     client.addListener(reqId, handler);
     client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
@@ -509,11 +512,24 @@ res.json(derivClient.getConnectionStatus());
 });
 
 const RSI_LIMITS_BY_ASSET = {
-  'forex':          { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 30, descricao: 'Forex' },
-  'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20, descricao: 'Volatility' },
-  'commodity':      { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Commodity' },
-  'criptomoeda':    { pullback: 30, extremo: 25, sobrecompra: 80, sobrevenda: 20, descricao: 'Criptomoeda' },
-  'indice_normal':  { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Índice Normal' }
+  // Forex tradicional: RSI mais estreito, reversões rápidas
+  'forex':           { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 30, descricao: 'Forex' },
+  // Volatility Index (R_ e 1HZ): muito volátil, zonas mais extremas
+  'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20, descricao: 'Volatility Index' },
+  // Boom Index: tende a subir em spikes, sobrecompra tolerada mais alta
+  'boom_index':      { pullback: 30, extremo: 25, sobrecompra: 85, sobrevenda: 20, descricao: 'Boom Index' },
+  // Crash Index: tende a cair em spikes, sobrevenda tolerada mais baixa
+  'crash_index':     { pullback: 35, extremo: 20, sobrecompra: 80, sobrevenda: 15, descricao: 'Crash Index' },
+  // Jump Index: movimentos bruscos em ambas direções, zonas bem extremas
+  'jump_index':      { pullback: 35, extremo: 28, sobrecompra: 82, sobrevenda: 18, descricao: 'Jump Index' },
+  // Step Index: movimentos pequenos e graduais, zonas mais próximas do centro
+  'step_index':      { pullback: 38, extremo: 32, sobrecompra: 72, sobrevenda: 28, descricao: 'Step Index' },
+  // Commodities (ouro, prata): moderado
+  'commodity':       { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Commodity' },
+  // Criptomoedas: muito volátil, zonas extremas parecidas com volatility
+  'criptomoeda':     { pullback: 30, extremo: 25, sobrecompra: 80, sobrevenda: 20, descricao: 'Criptomoeda' },
+  // Fallback para ativos não classificados
+  'indice_normal':   { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Índice Normal' }
 };
 
 function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
@@ -1073,8 +1089,35 @@ const timeframesToAnalyze = TRADING_MODES[mode].timeframes
 
 mtfManager = new MultiTimeframeManager(symbol);
 
-const tipoAtivo = symbol.startsWith('R_') ? 'volatility_index' :
-(symbol.includes('frx') ? 'forex' : 'indice_normal');
+// Detecção completa de tipo de ativo para todos os símbolos suportados
+const tipoAtivo = (() => {
+  // Volatility Index: R_10, R_25, R_50, R_75, R_90, R_100
+  if (symbol.startsWith('R_')) return 'volatility_index';
+  // Volatility 1s Index: 1HZ10V, 1HZ25V, 1HZ50V, 1HZ75V, 1HZ90V, 1HZ100V, 1HZ150V, 1HZ250V
+  if (symbol.startsWith('1HZ')) return 'volatility_index';
+  // Boom Index: BOOM150N, BOOM300N, BOOM500, BOOM600, BOOM900, BOOM1000
+  if (symbol.startsWith('BOOM')) return 'boom_index';
+  // Crash Index: CRASH50, CRASH150N, CRASH300N, CRASH500, CRASH600, CRASH1000
+  if (symbol.startsWith('CRASH')) return 'crash_index';
+  // Jump Index: JD10, JD25, JD50, JD75, JD100
+  if (symbol.startsWith('JD')) return 'jump_index';
+  // Step Index: stpRNG, stpRNG2, stpRNG3, stpRNG4, stpRNG5
+  if (symbol.startsWith('stpRNG')) return 'step_index';
+  // Commodities: ouro (frxXAUUSD) e prata (frxXAGUSD)
+  if (symbol === 'frxXAUUSD' || symbol === 'frxXAGUSD') return 'commodity';
+  // Criptomoedas: cryBTCUSD, cryETHUSD, cryLTCUSD, etc.
+  if (symbol.startsWith('cry')) return 'criptomoeda';
+  // Forex: frxEURUSD, frxGBPUSD, frxUSDJPY, etc.
+  if (symbol.startsWith('frx')) return 'forex';
+  // Fallback
+  return 'indice_normal';
+})();
+
+// FIX: Propagar tipoAtivo para o MultiTimeframeManager
+// Sem isso, consolidated.tipo_ativo retorna 'DEFAULT' para todos os ativos,
+// fazendo os limites de RSI de pullback usarem os valores errados.
+mtfManager.tipoAtivo = tipoAtivo;
+console.log(`🏷️ Tipo de ativo detectado: ${tipoAtivo} (${symbol})`);
 
 const sistemaBase = new SistemaAnaliseInteligente(symbol);
 
