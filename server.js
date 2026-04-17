@@ -131,13 +131,13 @@ return modeATRMap[mode] || 'M5';
 }
 
 const ALL_TIMEFRAMES_CONFIG = {
-'M1': { key: 'M1', seconds: 60, candleCount: 400, candleCountATR: 100, minRequired: 50 },
-'M5': { key: 'M5', seconds: 300, candleCount: 400, candleCountATR: 100, minRequired: 50 },
-'M15': { key: 'M15', seconds: 900, candleCount: 400, candleCountATR: 100, minRequired: 50 },
-'M30': { key: 'M30', seconds: 1800, candleCount: 400, candleCountATR: 100, minRequired: 50 },
-'H1': { key: 'H1', seconds: 3600, candleCount: 400, candleCountATR: 100, minRequired: 50 },
-'H4': { key: 'H4', seconds: 14400, candleCount: 400, candleCountATR: 100, minRequired: 50 },
-'H24': { key: 'H24', seconds: 86400, candleCount: 400, candleCountATR: 100, minRequired: 50 }
+'M1': { key: 'M1', seconds: 60, candleCount: 400, minRequired: 50 },
+'M5': { key: 'M5', seconds: 300, candleCount: 400, minRequired: 50 },
+'M15': { key: 'M15', seconds: 900, candleCount: 400, minRequired: 50 },
+'M30': { key: 'M30', seconds: 1800, candleCount: 400, minRequired: 50 },
+'H1': { key: 'H1', seconds: 3600, candleCount: 400, minRequired: 50 },
+'H4': { key: 'H4', seconds: 14400, candleCount: 400, minRequired: 50 },
+'H24': { key: 'H24', seconds: 86400, candleCount: 400, minRequired: 50 }
 };
 
 function isCandleClosed(candle, timeframeSeconds) {
@@ -295,30 +295,25 @@ return derivConnectionPromise;
 async function getCurrentPrice(client, symbol) {
 return new Promise((resolve) => {
 const reqId = Date.now();
-let resolved = false;
 
 const handler = (response) => {
-if (resolved) return;
 if (response.error) {
+console.log(`⚠️ Erro no tick: ${response.error.message}`);
 clearTimeout(timeout);
 if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
-resolved = true;
 resolve(null);
 } else if (response.tick && response.tick.symbol === symbol) {
 clearTimeout(timeout);
 if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
-resolved = true;
 resolve(response.tick.quote);
 }
 };
 
 const timeout = setTimeout(() => {
-if (resolved) return;
 console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
 if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
-resolved = true;
 resolve(null);
-}, 300); // REDUZIDO DE 800ms PARA 300ms
+}, 800);
 
 if (typeof client.addListener !== 'function') {
 console.log(`⚠️ DerivClient não suporta addListener`);
@@ -1035,10 +1030,6 @@ if (mtfManager.timeframes['H4']?.analysis?.preco_atual) return 'H4';
 return 'unknown';
 }
 
-// Cache simples para liquidez (evita recálculos consecutivos)
-const liquidityCache = new Map();
-const LIQUIDITY_CACHE_TTL = 5000; // 5 segundos
-
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
 const startTime = Date.now();
 
@@ -1060,9 +1051,6 @@ console.log(`\n🎯 Modo selecionado: ${mode} - ${TRADING_MODES[mode].descriptio
 console.log(`📊 Timeframes a analisar: ${TRADING_MODES[mode].timeframes.join(', ')}`);
 
 const client = await getDerivClient();
-
-// Iniciar busca de tick o MAIS CEDO POSSÍVEL (paralelo)
-const tickPromise = getCurrentPrice(client, symbol);
 
 const timeframesToAnalyze = TRADING_MODES[mode].timeframes
 .map(tfKey => ALL_TIMEFRAMES_CONFIG[tfKey]);
@@ -1093,11 +1081,7 @@ allTfKeysToFetch.map(async (tfKey) => {
 const tf = ALL_TIMEFRAMES_CONFIG[tfKey];
 if (!tf) return;
 try {
-// Para ATR, usamos menos candles (candleCountATR)
-const effectiveTf = (tfKey === atrTimeframeKey) 
-    ? { ...tf, candleCount: tf.candleCountATR } 
-    : tf;
-const candles = await getCandlesWithCache(client, symbol, effectiveTf, mode, false);
+const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
 if (Array.isArray(candles) && candles.length > 0) {
 candlesMap[tfKey] = candles;
 console.log(`✅ ${tfKey}: ${candles.length} candles prontos`);
@@ -1187,10 +1171,10 @@ consolidated.signal = "HOLD";
 consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
 
-// Aguardar o tick que já estava rodando em paralelo
 let currentPrice = 0;
 let priceSource = 'unknown';
-const tickResult = await tickPromise;
+
+const tickResult = await getCurrentPrice(client, symbol);
 if (tickResult) {
 currentPrice = tickResult;
 priceSource = 'tick';
@@ -1210,52 +1194,40 @@ priceSource = firstTf;
 console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
 }
 
-// ========== NOVO: DETECÇÃO DE LIQUIDEZ COM CACHE ==========
-const liquidityCacheKey = `liq:${symbol}:${mode}:${Math.floor(currentPrice)}`;
-const cachedLiquidity = liquidityCache.get(liquidityCacheKey);
-let liquidityResult;
-
-if (cachedLiquidity && (Date.now() - cachedLiquidity.timestamp) < LIQUIDITY_CACHE_TTL) {
-    liquidityResult = cachedLiquidity.result;
-    console.log(`💧 Liquidez (cache): ${liquidityResult.sweepDetected ? `${liquidityResult.direction} (${liquidityResult.confidence.toFixed(0)}%)` : 'Nenhum sweep'}`);
-} else {
-    // Construir analysisMap para o módulo de liquidez
-    const analysisMap = {};
-    for (const tfKey of TRADING_MODES[mode].timeframes) {
-        const analysis = mtfManager.timeframes[tfKey]?.analysis;
-        if (analysis) {
-            analysisMap[tfKey] = {
-                adx: analysis.adx,
-                rsi: analysis.rsi,
-                sinal: analysis.sinal
-            };
-        }
+// ========== NOVO: DETECÇÃO DE LIQUIDEZ ==========
+// Construir analysisMap para o módulo de liquidez
+const analysisMap = {};
+for (const tfKey of TRADING_MODES[mode].timeframes) {
+    const analysis = mtfManager.timeframes[tfKey]?.analysis;
+    if (analysis) {
+        analysisMap[tfKey] = {
+            adx: analysis.adx,
+            rsi: analysis.rsi,
+            sinal: analysis.sinal
+        };
     }
-
-    // Calcular ATR usando o timeframe apropriado para o modo
-    const atrCandles = candlesMap[atrTimeframeKey];
-    const atrValue = atrCandles ? calculateATR(atrCandles) : null;
-
-    // Detectar sweep de liquidez
-    liquidityResult = detectLiquiditySweepRobusto({
-        mode: mode,
-        currentPrice: currentPrice,
-        candlesMap: candlesMap,
-        analysisMap: analysisMap,
-        atrValue: atrValue
-    });
-    
-    liquidityCache.set(liquidityCacheKey, { result: liquidityResult, timestamp: Date.now() });
-    console.log(`💧 Liquidez detectada: ${liquidityResult.sweepDetected ? `${liquidityResult.direction} (${liquidityResult.confidence.toFixed(0)}%)` : 'Nenhum sweep relevante'}`);
 }
 
+// Calcular ATR usando o timeframe apropriado para o modo
+const atrCandles = candlesMap[atrTimeframeKey];
+const atrValue = atrCandles ? calculateATR(atrCandles) : null;
+
+// Detectar sweep de liquidez
+const liquidityResult = detectLiquiditySweepRobusto({
+    mode: mode,
+    currentPrice: currentPrice,
+    candlesMap: candlesMap,
+    analysisMap: analysisMap,
+    atrValue: atrValue
+});
+
+console.log(`💧 Liquidez detectada: ${liquidityResult.sweepDetected ? `${liquidityResult.direction} (${liquidityResult.confidence.toFixed(0)}%)` : 'Nenhum sweep relevante'}`);
+
 // (Opcional) Sobrescrever sinal principal se liquidez for muito forte
-// NOVA REGRA: Só substitui se NÃO houver divergência de timeframes
-const hasDivergence = (agreement.callCount > 0 && agreement.putCount > 0);
-if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && !hasDivergence) {
+if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75) {
     console.log(`⚠️ Sinal de liquidez forte (${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%) - substituindo sinal principal`);
     consolidated.signal = liquidityResult.direction;
-    consolidated.confidence = liquidityResult.confidence / 100;
+    consolidated.confidence = liquidityResult.confidence;
     consolidated.simpleMajority.signal = liquidityResult.direction;
 }
 // ==============================================
@@ -1460,7 +1432,7 @@ console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança
 console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
 console.log(`⚡ Busca e análise de timeframes em paralelo (Promise.all)`);
 console.log(`🔔 Alerta de pullback ativo em M1, M5, M15, H1 e H4 (com detecção rápida - PREVENTIVO/IMINENTE/EXTREMO)`);
-console.log(`💧 Caça à liquidez robusta ativada (liquidity-hunter-robusto) com cache 5s`);
+console.log(`💧 Caça à liquidez robusta ativada (liquidity-hunter-robusto)`);
 
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
