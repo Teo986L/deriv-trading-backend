@@ -8,7 +8,7 @@ const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
 const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
 const TraderBotAnalise = require('./analyzers/trader-bot-analyzer');
-// ========== NOVO: LIQUIDEZ ==========
+// ========== LIQUIDEZ ==========
 const { detectLiquiditySweepRobusto, calculateATR } = require('./analyzers/liquidity-hunter-robusto');
 // ====================================
 const { API_TOKEN, CANDLE_CLOSE_TOLERANCE, SMOOTHING } = require('./config');
@@ -131,9 +131,6 @@ return modeATRMap[mode] || 'M5';
 }
 
 // ========== FIX 1: REDUÇÃO DE candleCount (400 → 150/100/80/60) ==========
-// Os indicadores RSI(14), MACD(26), ADX(14) precisam de no máximo ~60 períodos
-// para estabilizar. O excedente ficava parado em memória sem uso algum.
-// Com 150 candles: ~30 de aquecimento + 120 efetivamente usados = resultados idênticos.
 const ALL_TIMEFRAMES_CONFIG = {
 'M1':  { key: 'M1',  seconds: 60,    candleCount: 150, minRequired: 50 },
 'M5':  { key: 'M5',  seconds: 300,   candleCount: 150, minRequired: 50 },
@@ -298,62 +295,59 @@ return derivConnectionPromise;
 }
 
 // ========== FIX 2: CORRIGIR LEAK DE LISTENERS em getCurrentPrice ==========
-// Versão anterior podia deixar handlers registrados sem remoção em certos
-// fluxos (WS fechado, resposta de outro símbolo, etc.), causando acúmulo
-// de listeners em memória a cada requisição.
 async function getCurrentPrice(client, symbol) {
   return new Promise((resolve) => {
-    // Abortar imediatamente se o WebSocket não estiver aberto
     if (!client.ws || client.ws.readyState !== client.ws.OPEN) {
       console.log(`⚠️ WebSocket não conectado para tick de ${symbol}`);
       return resolve(null);
     }
 
-    if (typeof client.addListener !== 'function') {
-      console.log(`⚠️ DerivClient não suporta addListener`);
+    if (typeof client.addListener !== 'function' || typeof client.removeListener !== 'function') {
+      console.log(`⚠️ DerivClient não suporta addListener/removeListener`);
       return resolve(null);
     }
 
-    const reqId = Date.now();
+    const reqId = Date.now() + Math.random().toString(36).substr(2, 5);
     let settled = false;
+    let timeout = null;
 
-    // Função de cleanup centralizada — garante remoção do listener em TODOS os fluxos
     const cleanup = () => {
-      if (typeof client.removeListener === 'function') {
+      if (timeout) clearTimeout(timeout);
+      try {
         client.removeListener(reqId, handler);
+      } catch (e) {
+        // ignora se já foi removido
       }
     };
 
     const handler = (response) => {
-      if (settled) return; // Evita dupla resolução
+      if (settled) return;
       if (response.error) {
-        console.log(`⚠️ Erro no tick: ${response.error.message}`);
         settled = true;
-        clearTimeout(timeout);
         cleanup();
         resolve(null);
       } else if (response.tick && response.tick.symbol === symbol) {
         settled = true;
-        clearTimeout(timeout);
         cleanup();
         resolve(response.tick.quote);
       }
     };
 
-    // FIX: Timeout aumentado de 800ms para 1500ms.
-    // R_10 e outros índices de volatilidade da Deriv têm latência maior no WS,
-    // causando timeout desnecessário e fallback para preço do candle.
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
       if (!settled) {
-        console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
         settled = true;
         cleanup();
         resolve(null);
       }
     }, 1500);
 
-    client.addListener(reqId, handler);
-    client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
+    try {
+      client.addListener(reqId, handler);
+      client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
+    } catch (err) {
+      cleanup();
+      resolve(null);
+    }
   });
 }
 // =========================================================================
@@ -512,23 +506,14 @@ res.json(derivClient.getConnectionStatus());
 });
 
 const RSI_LIMITS_BY_ASSET = {
-  // Forex tradicional: RSI mais estreito, reversões rápidas
   'forex':           { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 30, descricao: 'Forex' },
-  // Volatility Index (R_ e 1HZ): muito volátil, zonas mais extremas
   'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20, descricao: 'Volatility Index' },
-  // Boom Index: tende a subir em spikes, sobrecompra tolerada mais alta
   'boom_index':      { pullback: 30, extremo: 25, sobrecompra: 85, sobrevenda: 20, descricao: 'Boom Index' },
-  // Crash Index: tende a cair em spikes, sobrevenda tolerada mais baixa
   'crash_index':     { pullback: 35, extremo: 20, sobrecompra: 80, sobrevenda: 15, descricao: 'Crash Index' },
-  // Jump Index: movimentos bruscos em ambas direções, zonas bem extremas
   'jump_index':      { pullback: 35, extremo: 28, sobrecompra: 82, sobrevenda: 18, descricao: 'Jump Index' },
-  // Step Index: movimentos pequenos e graduais, zonas mais próximas do centro
   'step_index':      { pullback: 38, extremo: 32, sobrecompra: 72, sobrevenda: 28, descricao: 'Step Index' },
-  // Commodities (ouro, prata): moderado
   'commodity':       { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Commodity' },
-  // Criptomoedas: muito volátil, zonas extremas parecidas com volatility
   'criptomoeda':     { pullback: 30, extremo: 25, sobrecompra: 80, sobrevenda: 20, descricao: 'Criptomoeda' },
-  // Fallback para ativos não classificados
   'indice_normal':   { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Índice Normal' }
 };
 
@@ -1089,33 +1074,20 @@ const timeframesToAnalyze = TRADING_MODES[mode].timeframes
 
 mtfManager = new MultiTimeframeManager(symbol);
 
-// Detecção completa de tipo de ativo para todos os símbolos suportados
+// Detecção completa de tipo de ativo
 const tipoAtivo = (() => {
-  // Volatility Index: R_10, R_25, R_50, R_75, R_90, R_100
   if (symbol.startsWith('R_')) return 'volatility_index';
-  // Volatility 1s Index: 1HZ10V, 1HZ25V, 1HZ50V, 1HZ75V, 1HZ90V, 1HZ100V, 1HZ150V, 1HZ250V
   if (symbol.startsWith('1HZ')) return 'volatility_index';
-  // Boom Index: BOOM150N, BOOM300N, BOOM500, BOOM600, BOOM900, BOOM1000
   if (symbol.startsWith('BOOM')) return 'boom_index';
-  // Crash Index: CRASH50, CRASH150N, CRASH300N, CRASH500, CRASH600, CRASH1000
   if (symbol.startsWith('CRASH')) return 'crash_index';
-  // Jump Index: JD10, JD25, JD50, JD75, JD100
   if (symbol.startsWith('JD')) return 'jump_index';
-  // Step Index: stpRNG, stpRNG2, stpRNG3, stpRNG4, stpRNG5
   if (symbol.startsWith('stpRNG')) return 'step_index';
-  // Commodities: ouro (frxXAUUSD) e prata (frxXAGUSD)
   if (symbol === 'frxXAUUSD' || symbol === 'frxXAGUSD') return 'commodity';
-  // Criptomoedas: cryBTCUSD, cryETHUSD, cryLTCUSD, etc.
   if (symbol.startsWith('cry')) return 'criptomoeda';
-  // Forex: frxEURUSD, frxGBPUSD, frxUSDJPY, etc.
   if (symbol.startsWith('frx')) return 'forex';
-  // Fallback
   return 'indice_normal';
 })();
 
-// FIX: Propagar tipoAtivo para o MultiTimeframeManager
-// Sem isso, consolidated.tipo_ativo retorna 'DEFAULT' para todos os ativos,
-// fazendo os limites de RSI de pullback usarem os valores errados.
 mtfManager.tipoAtivo = tipoAtivo;
 console.log(`🏷️ Tipo de ativo detectado: ${tipoAtivo} (${symbol})`);
 
@@ -1134,7 +1106,7 @@ new Set([atrTimeframeKey, ...TRADING_MODES[mode].timeframes])
 
 console.log(`⚡ Buscando ${allTfKeysToFetch.length} timeframes em paralelo: ${allTfKeysToFetch.join(', ')}`);
 
-const candlesMap = {};
+let candlesMap = {};
 await Promise.all(
 allTfKeysToFetch.map(async (tfKey) => {
 const tf = ALL_TIMEFRAMES_CONFIG[tfKey];
@@ -1171,10 +1143,6 @@ break;
 
 console.log(`⚡ Analisando ${timeframesToAnalyze.length} timeframes em paralelo`);
 
-// FIX PERFORMANCE: Lançar tick ANTES da análise começar.
-// O tick corre em paralelo com toda a análise (~2-3s).
-// Quando chegar ao await tickPromise, já estará resolvido (ou em timeout),
-// eliminando os 1500ms bloqueantes que causavam lentidão em todos os ativos.
 const tickPromise = getCurrentPrice(client, symbol);
 
 await Promise.all(
@@ -1239,7 +1207,6 @@ consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 let currentPrice = 0;
 let priceSource = 'unknown';
 
-// Recolher resultado do tick — já estava a correr em paralelo com a análise
 const tickResult = await tickPromise;
 if (tickResult) {
 currentPrice = tickResult;
@@ -1457,25 +1424,18 @@ timestamp: new Date().toISOString()
 }
 };
 
+// ========== LIMPEZA EXPLÍCITA ANTES DE RESPONDER ==========
+if (mtfManager) {
+  mtfManager.timeframes = {};
+  mtfManager.allAnalyses = {};
+}
+candlesMap = null;
+historicalCandles = null;
+analysisMap = null;
+// =========================================================
+
 console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Tipo ativo: ${consolidated.tipo_ativo}`);
-
-// ========== FIX 3: ENVIAR RESPOSTA E DEPOIS LIMPAR OBJETOS GRANDES ==========
-// A resposta já foi enviada ao cliente antes do setImmediate.
-// O GC do Node.js coleta mais rápido quando as referências são explicitamente
-// removidas, evitando acúmulo entre requisições concorrentes.
 res.json(response);
-
-setImmediate(() => {
-  try {
-    if (mtfManager) {
-      mtfManager.timeframes = {};
-      mtfManager.allAnalyses = {};
-    }
-    // Força coleta de lixo se o Node foi iniciado com --expose-gc
-    if (global.gc) global.gc();
-  } catch (_) {}
-});
-// ============================================================================
 
 } catch (error) {
 console.error('❌ Erro na análise:', error);
@@ -1510,9 +1470,7 @@ console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
 console.log(`⚡ Busca e análise de timeframes em paralelo (Promise.all)`);
 console.log(`🔔 Alerta de pullback ativo em M1, M5, M15, H1 e H4 (com detecção rápida - PREVENTIVO/IMINENTE/EXTREMO)`);
 console.log(`💧 Caça à liquidez robusta ativada (liquidity-hunter-robusto)`);
-// ========== FIX 4: LEMBRETE DO --max-old-space-size ==========
-console.log(`🧠 [MEMÓRIA] Inicie com: node --max-old-space-size=400 server.js`);
-// =============================================================
+console.log(`🧠 [MEMÓRIA] Inicie com: node --max-old-space-size=512 server.js`);
 
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
