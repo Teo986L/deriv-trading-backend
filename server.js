@@ -1252,7 +1252,7 @@ if (cachedLiquidity && (Date.now() - cachedLiquidity.timestamp) < LIQUIDITY_CACH
 // (Opcional) Sobrescrever sinal principal se liquidez for muito forte
 // NOVA REGRA: Só substitui se NÃO houver divergência de timeframes
 const hasDivergence = (agreement.callCount > 0 && agreement.putCount > 0);
-if (liquidityResult.sweepDetected && liquidityResult.confidence >= 70 && !hasDivergence) {
+if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && !hasDivergence) {
     console.log(`⚠️ Sinal de liquidez forte (${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%) - substituindo sinal principal`);
     consolidated.signal = liquidityResult.direction;
     consolidated.confidence = liquidityResult.confidence / 100;
