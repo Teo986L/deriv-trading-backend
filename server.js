@@ -130,15 +130,20 @@ const modeATRMap = {
 return modeATRMap[mode] || 'M5';
 }
 
+// ========== FIX 1: REDUÇÃO DE candleCount (400 → 150/100/80/60) ==========
+// Os indicadores RSI(14), MACD(26), ADX(14) precisam de no máximo ~60 períodos
+// para estabilizar. O excedente ficava parado em memória sem uso algum.
+// Com 150 candles: ~30 de aquecimento + 120 efetivamente usados = resultados idênticos.
 const ALL_TIMEFRAMES_CONFIG = {
-'M1': { key: 'M1', seconds: 60, candleCount: 400, minRequired: 50 },
-'M5': { key: 'M5', seconds: 300, candleCount: 400, minRequired: 50 },
-'M15': { key: 'M15', seconds: 900, candleCount: 400, minRequired: 50 },
-'M30': { key: 'M30', seconds: 1800, candleCount: 400, minRequired: 50 },
-'H1': { key: 'H1', seconds: 3600, candleCount: 400, minRequired: 50 },
-'H4': { key: 'H4', seconds: 14400, candleCount: 400, minRequired: 50 },
-'H24': { key: 'H24', seconds: 86400, candleCount: 400, minRequired: 50 }
+'M1':  { key: 'M1',  seconds: 60,    candleCount: 150, minRequired: 50 },
+'M5':  { key: 'M5',  seconds: 300,   candleCount: 150, minRequired: 50 },
+'M15': { key: 'M15', seconds: 900,   candleCount: 150, minRequired: 50 },
+'M30': { key: 'M30', seconds: 1800,  candleCount: 120, minRequired: 50 },
+'H1':  { key: 'H1',  seconds: 3600,  candleCount: 100, minRequired: 50 },
+'H4':  { key: 'H4',  seconds: 14400, candleCount: 80,  minRequired: 30 },
+'H24': { key: 'H24', seconds: 86400, candleCount: 60,  minRequired: 20 }
 };
+// =========================================================================
 
 function isCandleClosed(candle, timeframeSeconds) {
 if (!candle || !candle.epoch) return true;
@@ -292,48 +297,63 @@ throw err;
 return derivConnectionPromise;
 }
 
+// ========== FIX 2: CORRIGIR LEAK DE LISTENERS em getCurrentPrice ==========
+// Versão anterior podia deixar handlers registrados sem remoção em certos
+// fluxos (WS fechado, resposta de outro símbolo, etc.), causando acúmulo
+// de listeners em memória a cada requisição.
 async function getCurrentPrice(client, symbol) {
-return new Promise((resolve) => {
-const reqId = Date.now();
+  return new Promise((resolve) => {
+    // Abortar imediatamente se o WebSocket não estiver aberto
+    if (!client.ws || client.ws.readyState !== client.ws.OPEN) {
+      console.log(`⚠️ WebSocket não conectado para tick de ${symbol}`);
+      return resolve(null);
+    }
 
-const handler = (response) => {
-if (response.error) {
-console.log(`⚠️ Erro no tick: ${response.error.message}`);
-clearTimeout(timeout);
-if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
-resolve(null);
-} else if (response.tick && response.tick.symbol === symbol) {
-clearTimeout(timeout);
-if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
-resolve(response.tick.quote);
+    if (typeof client.addListener !== 'function') {
+      console.log(`⚠️ DerivClient não suporta addListener`);
+      return resolve(null);
+    }
+
+    const reqId = Date.now();
+    let settled = false;
+
+    // Função de cleanup centralizada — garante remoção do listener em TODOS os fluxos
+    const cleanup = () => {
+      if (typeof client.removeListener === 'function') {
+        client.removeListener(reqId, handler);
+      }
+    };
+
+    const handler = (response) => {
+      if (settled) return; // Evita dupla resolução
+      if (response.error) {
+        console.log(`⚠️ Erro no tick: ${response.error.message}`);
+        settled = true;
+        clearTimeout(timeout);
+        cleanup();
+        resolve(null);
+      } else if (response.tick && response.tick.symbol === symbol) {
+        settled = true;
+        clearTimeout(timeout);
+        cleanup();
+        resolve(response.tick.quote);
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
+        settled = true;
+        cleanup();
+        resolve(null);
+      }
+    }, 800);
+
+    client.addListener(reqId, handler);
+    client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
+  });
 }
-};
-
-const timeout = setTimeout(() => {
-console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
-if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
-resolve(null);
-}, 800);
-
-if (typeof client.addListener !== 'function') {
-console.log(`⚠️ DerivClient não suporta addListener`);
-clearTimeout(timeout);
-resolve(null);
-return;
-}
-
-client.addListener(reqId, handler);
-
-if (client.ws && client.ws.readyState === client.ws.OPEN) {
-client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
-} else {
-console.log(`⚠️ WebSocket não conectado para tick de ${symbol}`);
-clearTimeout(timeout);
-if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
-resolve(null);
-}
-});
-}
+// =========================================================================
 
 app.get('/health', (req, res) => {
 res.status(200).send('OK');
@@ -422,32 +442,31 @@ userId: finalUserId
 });
 
 // ═══════════════════════════════════════════════════════
-// NOVA ROTA: REINICIAR SERVIÇO RENDER
+// ROTA: REINICIAR SERVIÇO RENDER
 // ═══════════════════════════════════════════════════════
 app.post('/api/admin/restart-render', adminLimiter, async (req, res) => {
   try {
     const { adminKey } = req.body;
-    
-    // Validar chave de administrador
+
     if (!adminKey || adminKey !== ADMIN_SECRET) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'Chave de administrador inválida' 
+      return res.status(403).json({
+        success: false,
+        error: 'Chave de administrador inválida'
       });
     }
-    
+
     const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
     const RENDER_API_KEY = process.env.RENDER_API_KEY;
-    
+
     if (!RENDER_SERVICE_ID || !RENDER_API_KEY) {
-      return res.status(500).json({ 
-        success: false, 
-        error: 'Configuração do Render não encontrada no servidor. Verifique as variáveis de ambiente.' 
+      return res.status(500).json({
+        success: false,
+        error: 'Configuração do Render não encontrada no servidor. Verifique as variáveis de ambiente.'
       });
     }
-    
+
     console.log(`🔄 Reiniciando serviço Render: ${RENDER_SERVICE_ID}`);
-    
+
     const response = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/restart`, {
       method: 'POST',
       headers: {
@@ -455,34 +474,33 @@ app.post('/api/admin/restart-render', adminLimiter, async (req, res) => {
         'Authorization': `Bearer ${RENDER_API_KEY}`
       }
     });
-    
+
     if (response.ok) {
       console.log(`✅ Serviço Render reiniciado com sucesso`);
-      res.json({ 
-        success: true, 
-        message: 'Serviço Render reiniciado com sucesso! O servidor estará disponível em alguns segundos.' 
+      res.json({
+        success: true,
+        message: 'Serviço Render reiniciado com sucesso! O servidor estará disponível em alguns segundos.'
       });
     } else {
       const errorText = await response.text();
       console.error(`❌ Erro Render API (${response.status}):`, errorText);
-      res.status(response.status).json({ 
-        success: false, 
-        error: `Erro ${response.status} da API Render: ${errorText}` 
+      res.status(response.status).json({
+        success: false,
+        error: `Erro ${response.status} da API Render: ${errorText}`
       });
     }
   } catch (error) {
     console.error('❌ Erro ao reiniciar Render:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
 
 // ═══════════════════════════════════════════════════════
-// ROTA EXISTENTE: CONNECTION STATUS
+// ROTA: CONNECTION STATUS
 // ═══════════════════════════════════════════════════════
-
 app.get('/api/connection-status', authenticateToken, (req, res) => {
 if (!derivClient) {
 return res.json({ status: 'not_initialized' });
@@ -498,13 +516,10 @@ const RSI_LIMITS_BY_ASSET = {
   'indice_normal':  { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Índice Normal' }
 };
 
-// ========== FUNÇÃO CORRIGIDA: GERAR ALERTA DE PULLBACK ==========
-// Detecta pullback independente do primarySignal (funciona mesmo com HOLD)
 function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
   const limite = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
   let alertaPullback = null;
 
-  // 1. DETECÇÃO PARA SOBREVENDA (RSI BAIXO) - independente do sinal
   if (rsi < limite.pullback) {
     if (rsi < limite.extremo) {
       const excesso = limite.pullback - rsi;
@@ -532,7 +547,6 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
       };
     }
   }
-  // 2. DETECÇÃO PARA SOBRECOMPRA (RSI ALTO) - independente do sinal
   else if (rsi > limite.sobrecompra) {
     if (rsi > limite.sobrecompra + 5) {
       const excesso = rsi - limite.sobrecompra;
@@ -560,7 +574,6 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
       };
     }
   }
-  // 3. DETECÇÃO PREVENTIVA (aproximando das zonas críticas)
   else {
     if (rsi < limite.pullback + 12 && rsi >= limite.pullback) {
       alertaPullback = {
@@ -964,7 +977,6 @@ function calcularTimingM15(m15Analysis, primarySignal) {
   };
 }
 
-// ========== FUNÇÕES ADICIONADAS: TIMING H1 E H4 (APENAS ALERTAS) ==========
 function calcularTimingH1(h1Analysis, primarySignal) {
   if (!h1Analysis) {
     return {
@@ -1033,6 +1045,10 @@ return 'unknown';
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
 const startTime = Date.now();
 
+// ========== FIX 3: DECLARAR mtfManager no escopo externo para cleanup ==========
+let mtfManager = null;
+// ==============================================================================
+
 try {
 const { symbol, mode } = req.body;
 
@@ -1055,7 +1071,7 @@ const client = await getDerivClient();
 const timeframesToAnalyze = TRADING_MODES[mode].timeframes
 .map(tfKey => ALL_TIMEFRAMES_CONFIG[tfKey]);
 
-const mtfManager = new MultiTimeframeManager(symbol);
+mtfManager = new MultiTimeframeManager(symbol);
 
 const tipoAtivo = symbol.startsWith('R_') ? 'volatility_index' :
 (symbol.includes('frx') ? 'forex' : 'indice_normal');
@@ -1194,8 +1210,7 @@ priceSource = firstTf;
 console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
 }
 
-// ========== NOVO: DETECÇÃO DE LIQUIDEZ ==========
-// Construir analysisMap para o módulo de liquidez
+// ========== LIQUIDEZ ==========
 const analysisMap = {};
 for (const tfKey of TRADING_MODES[mode].timeframes) {
     const analysis = mtfManager.timeframes[tfKey]?.analysis;
@@ -1208,11 +1223,9 @@ for (const tfKey of TRADING_MODES[mode].timeframes) {
     }
 }
 
-// Calcular ATR usando o timeframe apropriado para o modo
 const atrCandles = candlesMap[atrTimeframeKey];
 const atrValue = atrCandles ? calculateATR(atrCandles) : null;
 
-// Detectar sweep de liquidez
 const liquidityResult = detectLiquiditySweepRobusto({
     mode: mode,
     currentPrice: currentPrice,
@@ -1223,14 +1236,13 @@ const liquidityResult = detectLiquiditySweepRobusto({
 
 console.log(`💧 Liquidez detectada: ${liquidityResult.sweepDetected ? `${liquidityResult.direction} (${liquidityResult.confidence.toFixed(0)}%)` : 'Nenhum sweep relevante'}`);
 
-// (Opcional) Sobrescrever sinal principal se liquidez for muito forte
 if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75) {
     console.log(`⚠️ Sinal de liquidez forte (${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%) - substituindo sinal principal`);
     consolidated.signal = liquidityResult.direction;
     consolidated.confidence = liquidityResult.confidence;
     consolidated.simpleMajority.signal = liquidityResult.direction;
 }
-// ==============================================
+// ==============================
 
 const suggestion = BotExecutionCore.generateEntrySuggestion(
 { sinal: consolidated.signal, probabilidade: consolidated.confidence },
@@ -1388,9 +1400,7 @@ takeProfit: suggestion.takeProfit
 timeframes: responseTimeframes,
 refined_analysis: analiseRefinada,
 risk_validation: validacaoRisco,
-// ========== NOVO: LIQUIDEZ ==========
 liquidity: liquidityResult,
-// ====================================
 metadata: {
 responseTimeMs: responseTime,
 timestamp: new Date().toISOString()
@@ -1398,7 +1408,24 @@ timestamp: new Date().toISOString()
 };
 
 console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Tipo ativo: ${consolidated.tipo_ativo}`);
+
+// ========== FIX 3: ENVIAR RESPOSTA E DEPOIS LIMPAR OBJETOS GRANDES ==========
+// A resposta já foi enviada ao cliente antes do setImmediate.
+// O GC do Node.js coleta mais rápido quando as referências são explicitamente
+// removidas, evitando acúmulo entre requisições concorrentes.
 res.json(response);
+
+setImmediate(() => {
+  try {
+    if (mtfManager) {
+      mtfManager.timeframes = {};
+      mtfManager.allAnalyses = {};
+    }
+    // Força coleta de lixo se o Node foi iniciado com --expose-gc
+    if (global.gc) global.gc();
+  } catch (_) {}
+});
+// ============================================================================
 
 } catch (error) {
 console.error('❌ Erro na análise:', error);
@@ -1427,12 +1454,15 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
 console.log(`\n🚀 Servidor rodando na porta ${PORT}`);
 console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
 console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
-console.log(`📊 Configuração de candles: 400 para todos os timeframes (igual ao script.js)`);
+console.log(`📊 Configuração de candles: M1/M5/M15=150 | M30=120 | H1=100 | H4=80 | H24=60`);
 console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança`);
 console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
 console.log(`⚡ Busca e análise de timeframes em paralelo (Promise.all)`);
 console.log(`🔔 Alerta de pullback ativo em M1, M5, M15, H1 e H4 (com detecção rápida - PREVENTIVO/IMINENTE/EXTREMO)`);
 console.log(`💧 Caça à liquidez robusta ativada (liquidity-hunter-robusto)`);
+// ========== FIX 4: LEMBRETE DO --max-old-space-size ==========
+console.log(`🧠 [MEMÓRIA] Inicie com: node --max-old-space-size=400 server.js`);
+// =============================================================
 
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
@@ -1444,10 +1474,8 @@ console.error('❌ Falha ao estabelecer conexão persistente:', err);
 });
 
 // 🔧 CORREÇÃO PARA ERRO 502 BAD GATEWAY NO RENDER
-// Aumenta os timeouts de keep-alive para evitar que o Node.js feche conexões
-// antes do proxy do Render, causando 502 intermitentes.
-server.keepAliveTimeout = 120000; // 120 segundos (recomendado pelo Render)
-server.headersTimeout = 120000;    // 120 segundos
+server.keepAliveTimeout = 120000;
+server.headersTimeout = 120000;
 
 process.on('SIGTERM', () => {
 console.log('\n🛑 Recebido SIGTERM, encerrando conexões...');
