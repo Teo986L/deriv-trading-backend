@@ -811,16 +811,36 @@ if (hasMacdDivergence) {
   consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
 
-let currentPrice = 0, priceSource = 'unknown';
-const tickResult = await tickPromise;
-if (tickResult) { currentPrice = tickResult; priceSource = 'tick'; console.log(`💰 Preço via tick: ${currentPrice}`); }
-else if (mtfManager.timeframes['M1']?.analysis?.preco_atual) { currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual; priceSource = 'M1'; }
-else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) { currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual; priceSource = 'M5'; }
-else { const firstTf = timeframesToAnalyze[0]?.key || 'M5'; currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0; priceSource = firstTf; }
+// Definir preço base IMEDIATAMENTE (usa M1, que é instantâneo)
+let currentPrice = 0;
+let priceSource = 'unknown';
 
-for (const tfKey of TRADING_MODES[mode].timeframes) {
-  const analysis = mtfManager.timeframes[tfKey]?.analysis;
-  if (analysis) analysisMap[tfKey] = { adx: analysis.adx, rsi: analysis.rsi, sinal: analysis.sinal };
+if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
+    currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
+    priceSource = 'M1';
+    console.log(`💰 Preço base via M1 (instantâneo): ${currentPrice}`);
+} else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) {
+    currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual;
+    priceSource = 'M5';
+    console.log(`💰 Preço base via M5 (instantâneo): ${currentPrice}`);
+} else {
+    const firstTf = timeframesToAnalyze[0]?.key || 'M5';
+    currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
+    priceSource = firstTf;
+    console.log(`💰 Preço base via fallback (${firstTf}): ${currentPrice}`);
+}
+
+// Agora, tenta obter o tick, mas NÃO ESPERA mais que 200ms.
+// Se o tick já tiver chegado, ótimo. Se não, segue com o preço do M1.
+const tickTimeout = new Promise((resolve) => setTimeout(() => resolve(null), 200));
+const tickResult = await Promise.race([tickPromise, tickTimeout]);
+
+if (tickResult) {
+    currentPrice = tickResult;
+    priceSource = 'tick';
+    console.log(`💰 Preço ATUALIZADO via tick: ${currentPrice}`);
+} else {
+    console.log(`💰 Preço final via ${priceSource} (tick não disponível em 200ms)`);
 }
 
 const atrCandles = candlesMap[atrTimeframeKey];
