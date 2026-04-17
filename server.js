@@ -135,11 +135,11 @@ return modeATRMap[mode] || 'M5';
 // para estabilizar. O excedente ficava parado em memória sem uso algum.
 // Com 150 candles: ~30 de aquecimento + 120 efetivamente usados = resultados idênticos.
 const ALL_TIMEFRAMES_CONFIG = {
-'M1':  { key: 'M1',  seconds: 60,    candleCount: 150, minRequired: 50 },
+'M1':  { key: 'M1',  seconds: 60,    candleCount: 200, minRequired: 100 },
 'M5':  { key: 'M5',  seconds: 300,   candleCount: 150, minRequired: 50 },
-'M15': { key: 'M15', seconds: 900,   candleCount: 150, minRequired: 50 },
+'M15': { key: 'M15', seconds: 900,   candleCount: 150, minRequired: 100 },
 'M30': { key: 'M30', seconds: 1800,  candleCount: 120, minRequired: 50 },
-'H1':  { key: 'H1',  seconds: 3600,  candleCount: 100, minRequired: 50 },
+'H1':  { key: 'H1',  seconds: 3600,  candleCount: 100, minRequired: 100 },
 'H4':  { key: 'H4',  seconds: 14400, candleCount: 80,  minRequired: 30 },
 'H24': { key: 'H24', seconds: 86400, candleCount: 60,  minRequired: 20 }
 };
