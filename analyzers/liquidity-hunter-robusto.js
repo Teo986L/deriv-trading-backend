@@ -4,12 +4,24 @@
 
 /**
  * CONFIGURAÇÕES POR MODO
+ *
+ * IMPORTANTE — lookbacks devem ser SEMPRE menores que o candleCount
+ * configurado em ALL_TIMEFRAMES_CONFIG no server.js:
+ *   M1/M5/M15 = 150 candles  → lookbacks máx ~130
+ *   M30        = 120 candles  → lookbacks máx ~100
+ *   H1         = 100 candles  → lookbacks máx ~85
+ *   H4         =  80 candles  → lookbacks máx ~65
+ *   H24        =  60 candles  → lookbacks máx ~45
+ *
+ * Se lookback > candleCount disponível, o módulo retorna
+ * "Candles insuficientes" e a liquidez não é calculada.
  */
 const MODE_CONFIG = {
     SNIPER: {
         primaryTimeframe: 'M1',
         secondaryTimeframe: 'M5',
         tertiaryTimeframe: 'M15',
+        // M1 tem 150 candles → lookbacks seguros abaixo de 130
         lookbacks: [20, 50],
         thresholdATRMultiplier: 0.5,
         thresholdPercent: 0.003,
@@ -25,6 +37,7 @@ const MODE_CONFIG = {
         primaryTimeframe: 'M5',
         secondaryTimeframe: 'M15',
         tertiaryTimeframe: 'H1',
+        // M5 tem 150 candles → lookbacks seguros abaixo de 130
         lookbacks: [50, 100],
         thresholdATRMultiplier: 0.75,
         thresholdPercent: 0.005,
@@ -40,7 +53,11 @@ const MODE_CONFIG = {
         primaryTimeframe: 'H1',
         secondaryTimeframe: 'H4',
         tertiaryTimeframe: 'H24',
-        lookbacks: [100, 200],
+        // FIX: H1 tem apenas 100 candles.
+        // Lookbacks anteriores [100, 200] causavam erro "candles insuficientes"
+        // porque Math.max(100, 200) = 200 > 100 disponíveis.
+        // Novos lookbacks [50, 80] ficam dentro dos 100 candles do H1.
+        lookbacks: [50, 80],
         thresholdATRMultiplier: 1.0,
         thresholdPercent: 0.01,
         confirmCandles: 1,
@@ -179,8 +196,18 @@ function detectLiquiditySweepRobusto({
 
     const primaryTF = config.primaryTimeframe;
     const candles = candlesMap[primaryTF];
-    if (!candles || candles.length < Math.max(...config.lookbacks)) {
-        return { sweepDetected: false, reason: `Candles insuficientes para ${primaryTF}` };
+
+    // FIX: Verificação robusta de candles suficientes
+    // Usa Math.max dos lookbacks mas com fallback para o máximo disponível
+    const maxLookback = Math.max(...config.lookbacks);
+    if (!candles || candles.length < 20) {
+        return { sweepDetected: false, reason: `Candles insuficientes para ${primaryTF} (${candles?.length || 0} disponíveis, mínimo 20)` };
+    }
+
+    // Ajustar lookbacks dinamicamente se houver menos candles do que o esperado
+    const effectiveLookbacks = config.lookbacks.map(lb => Math.min(lb, candles.length - 1)).filter(lb => lb >= 10);
+    if (effectiveLookbacks.length === 0) {
+        return { sweepDetected: false, reason: `Candles insuficientes para calcular lookbacks em ${primaryTF}` };
     }
 
     // 1. Calcular threshold
@@ -190,11 +217,11 @@ function detectLiquiditySweepRobusto({
     const minThreshold = currentPrice * 0.0005;
     threshold = Math.max(threshold, minThreshold);
 
-    // 2. Múltiplos níveis de liquidez
-    const { highs, lows } = getMultiLevelHighLow(candles, config.lookbacks);
+    // 2. Múltiplos níveis de liquidez (usando lookbacks efetivos)
+    const { highs, lows } = getMultiLevelHighLow(candles, effectiveLookbacks);
     const allLevels = [];
 
-    for (const lb of config.lookbacks) {
+    for (const lb of effectiveLookbacks) {
         if (highs[lb] !== null) {
             allLevels.push({ price: highs[lb], type: `HIGH_${lb}`, lookback: lb, direction: 'above' });
         }
@@ -204,7 +231,8 @@ function detectLiquiditySweepRobusto({
     }
 
     // 3. Níveis de suporte/resistência
-    const srLevels = detectSupportResistanceLevels(candles, 100, threshold * 0.5, config.minTouchCount);
+    const srLookback = Math.min(100, candles.length - 1);
+    const srLevels = detectSupportResistanceLevels(candles, srLookback, threshold * 0.5, config.minTouchCount);
     for (const lvl of srLevels) {
         allLevels.push({ price: lvl.price, type: 'SR', touches: lvl.touches, direction: 'both' });
     }
@@ -328,7 +356,7 @@ function detectLiquiditySweepRobusto({
         },
         details: {
             primaryTimeframe: primaryTF,
-            lookbacks: config.lookbacks,
+            lookbacks: effectiveLookbacks,
             candleAgeSec: bestSweep.candleAgeSec,
             reasons: bestSweep.reasons
         }
