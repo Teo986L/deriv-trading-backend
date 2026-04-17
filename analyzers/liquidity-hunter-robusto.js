@@ -4,24 +4,12 @@
 
 /**
  * CONFIGURAÇÕES POR MODO
- *
- * IMPORTANTE — lookbacks devem ser SEMPRE menores que o candleCount
- * configurado em ALL_TIMEFRAMES_CONFIG no server.js:
- *   M1/M5/M15 = 150 candles  → lookbacks máx ~130
- *   M30        = 120 candles  → lookbacks máx ~100
- *   H1         = 100 candles  → lookbacks máx ~85
- *   H4         =  80 candles  → lookbacks máx ~65
- *   H24        =  60 candles  → lookbacks máx ~45
- *
- * Se lookback > candleCount disponível, o módulo retorna
- * "Candles insuficientes" e a liquidez não é calculada.
  */
 const MODE_CONFIG = {
     SNIPER: {
         primaryTimeframe: 'M1',
         secondaryTimeframe: 'M5',
         tertiaryTimeframe: 'M15',
-        // M1 tem 150 candles → lookbacks seguros abaixo de 130
         lookbacks: [20, 50],
         thresholdATRMultiplier: 0.5,
         thresholdPercent: 0.003,
@@ -37,7 +25,6 @@ const MODE_CONFIG = {
         primaryTimeframe: 'M5',
         secondaryTimeframe: 'M15',
         tertiaryTimeframe: 'H1',
-        // M5 tem 150 candles → lookbacks seguros abaixo de 130
         lookbacks: [50, 100],
         thresholdATRMultiplier: 0.75,
         thresholdPercent: 0.005,
@@ -53,10 +40,6 @@ const MODE_CONFIG = {
         primaryTimeframe: 'H1',
         secondaryTimeframe: 'H4',
         tertiaryTimeframe: 'H24',
-        // FIX: H1 tem apenas 100 candles.
-        // Lookbacks anteriores [100, 200] causavam erro "candles insuficientes"
-        // porque Math.max(100, 200) = 200 > 100 disponíveis.
-        // Novos lookbacks [50, 80] ficam dentro dos 100 candles do H1.
         lookbacks: [50, 80],
         thresholdATRMultiplier: 1.0,
         thresholdPercent: 0.01,
@@ -107,16 +90,20 @@ function getAverageTickVolume(candles, lookback = 20) {
 }
 
 /**
- * Encontra máximas e mínimas para múltiplos lookbacks
+ * Encontra máximas e mínimas para múltiplos lookbacks (otimizada)
  */
 function getMultiLevelHighLow(candles, lookbacks) {
     const resultHighs = {};
     const resultLows = {};
+    const len = candles.length;
+
     for (const lb of lookbacks) {
-        if (candles.length >= lb) {
-            const slice = candles.slice(-lb);
-            let maxHigh = -Infinity, minLow = Infinity;
-            for (const c of slice) {
+        if (len >= lb) {
+            let maxHigh = -Infinity;
+            let minLow = Infinity;
+            const startIdx = len - lb;
+            for (let i = startIdx; i < len; i++) {
+                const c = candles[i];
                 if (c.high > maxHigh) maxHigh = c.high;
                 if (c.low < minLow) minLow = c.low;
             }
@@ -197,14 +184,10 @@ function detectLiquiditySweepRobusto({
     const primaryTF = config.primaryTimeframe;
     const candles = candlesMap[primaryTF];
 
-    // FIX: Verificação robusta de candles suficientes
-    // Usa Math.max dos lookbacks mas com fallback para o máximo disponível
-    const maxLookback = Math.max(...config.lookbacks);
     if (!candles || candles.length < 20) {
         return { sweepDetected: false, reason: `Candles insuficientes para ${primaryTF} (${candles?.length || 0} disponíveis, mínimo 20)` };
     }
 
-    // Ajustar lookbacks dinamicamente se houver menos candles do que o esperado
     const effectiveLookbacks = config.lookbacks.map(lb => Math.min(lb, candles.length - 1)).filter(lb => lb >= 10);
     if (effectiveLookbacks.length === 0) {
         return { sweepDetected: false, reason: `Candles insuficientes para calcular lookbacks em ${primaryTF}` };
@@ -217,7 +200,7 @@ function detectLiquiditySweepRobusto({
     const minThreshold = currentPrice * 0.0005;
     threshold = Math.max(threshold, minThreshold);
 
-    // 2. Múltiplos níveis de liquidez (usando lookbacks efetivos)
+    // 2. Múltiplos níveis de liquidez
     const { highs, lows } = getMultiLevelHighLow(candles, effectiveLookbacks);
     const allLevels = [];
 
