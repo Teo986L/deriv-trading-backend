@@ -8,6 +8,9 @@ const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
 const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
 const TraderBotAnalise = require('./analyzers/trader-bot-analyzer');
+// ========== NOVO: LIQUIDEZ ==========
+const { detectLiquiditySweepRobusto, calculateATR } = require('./analyzers/liquidity-hunter-robusto');
+// ====================================
 const { API_TOKEN, CANDLE_CLOSE_TOLERANCE, SMOOTHING } = require('./config');
 
 const app = express();
@@ -1191,6 +1194,44 @@ priceSource = firstTf;
 console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
 }
 
+// ========== NOVO: DETECÇÃO DE LIQUIDEZ ==========
+// Construir analysisMap para o módulo de liquidez
+const analysisMap = {};
+for (const tfKey of TRADING_MODES[mode].timeframes) {
+    const analysis = mtfManager.timeframes[tfKey]?.analysis;
+    if (analysis) {
+        analysisMap[tfKey] = {
+            adx: analysis.adx,
+            rsi: analysis.rsi,
+            sinal: analysis.sinal
+        };
+    }
+}
+
+// Calcular ATR usando o timeframe apropriado para o modo
+const atrCandles = candlesMap[atrTimeframeKey];
+const atrValue = atrCandles ? calculateATR(atrCandles) : null;
+
+// Detectar sweep de liquidez
+const liquidityResult = detectLiquiditySweepRobusto({
+    mode: mode,
+    currentPrice: currentPrice,
+    candlesMap: candlesMap,
+    analysisMap: analysisMap,
+    atrValue: atrValue
+});
+
+console.log(`💧 Liquidez detectada: ${liquidityResult.sweepDetected ? `${liquidityResult.direction} (${liquidityResult.confidence.toFixed(0)}%)` : 'Nenhum sweep relevante'}`);
+
+// (Opcional) Sobrescrever sinal principal se liquidez for muito forte
+if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75) {
+    console.log(`⚠️ Sinal de liquidez forte (${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%) - substituindo sinal principal`);
+    consolidated.signal = liquidityResult.direction;
+    consolidated.confidence = liquidityResult.confidence;
+    consolidated.simpleMajority.signal = liquidityResult.direction;
+}
+// ==============================================
+
 const suggestion = BotExecutionCore.generateEntrySuggestion(
 { sinal: consolidated.signal, probabilidade: consolidated.confidence },
 currentPrice
@@ -1347,6 +1388,9 @@ takeProfit: suggestion.takeProfit
 timeframes: responseTimeframes,
 refined_analysis: analiseRefinada,
 risk_validation: validacaoRisco,
+// ========== NOVO: LIQUIDEZ ==========
+liquidity: liquidityResult,
+// ====================================
 metadata: {
 responseTimeMs: responseTime,
 timestamp: new Date().toISOString()
@@ -1388,6 +1432,7 @@ console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança
 console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
 console.log(`⚡ Busca e análise de timeframes em paralelo (Promise.all)`);
 console.log(`🔔 Alerta de pullback ativo em M1, M5, M15, H1 e H4 (com detecção rápida - PREVENTIVO/IMINENTE/EXTREMO)`);
+console.log(`💧 Caça à liquidez robusta ativada (liquidity-hunter-robusto)`);
 
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
