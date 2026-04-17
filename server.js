@@ -334,7 +334,7 @@ async function getCurrentPrice(client, symbol) {
         cleanup();
         resolve(null);
       }
-    }, 1500);
+    }, 800);
 
     try {
       client.addListener(reqId, handler);
