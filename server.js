@@ -542,6 +542,10 @@ if (p) { currentPrice = p; priceSource = tf; break; }
 console.log(`💰 fallback (${priceSource}): ${currentPrice}`);
 }
 
+const suggestion = BotExecutionCore.generateEntrySuggestion(
+{ sinal: consolidated.signal, probabilidade: consolidated.confidence }, currentPrice
+);
+
 // ── 8. Timing + analiseRefinada em PARALELO ──────────────────────────────────
 const primarySignal = consolidated.simpleMajority.signal;
 
@@ -618,22 +622,6 @@ console.log(`💧 Liquidez forte mas TIMING NÃO OK - mantendo sinal`);
 } else if (hasTfDivergenceForLiquidity && liquidityResult.sweepDetected) {
 console.log(`🔒 Liquidez detectada mas TFs divergem - mantendo sinal`);
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// TRAVA DE TIMING: Forçar HOLD se o timing do modo NÃO estiver OK
-// ═══════════════════════════════════════════════════════════════════════════════
-let timingOkForSignal = false;
-if (mode === 'SNIPER'   && m1Timing?.permitido)  timingOkForSignal = true;
-if (mode === 'CAÇADOR'  && m5Timing?.permitido)  timingOkForSignal = true;
-if (mode === 'PESCADOR' && m15Timing?.permitido) timingOkForSignal = true;
-
-if (!timingOkForSignal && consolidated.signal !== 'HOLD') {
-    console.log(`⏳ Timing do modo ${mode} NÃO OK (${mode === 'SNIPER' ? 'M1' : mode === 'CAÇADOR' ? 'M5' : 'M15'} = AGUARDAR) - forçando HOLD`);
-    consolidated.signal = 'HOLD';
-    consolidated.confidence = Math.min(consolidated.confidence, 0.3);
-    consolidated.simpleMajority.signal = 'HOLD';
-}
-// ═══════════════════════════════════════════════════════════════════════════════
 
 // ── 10. Aguardar analiseRefinada (já estava a correr em paralelo) ─────────────
 const { analiseRefinada, validacaoRisco } = await analiseRefinadaPromise;
@@ -719,7 +707,6 @@ console.log(`📊 Candles: M1→100 | M5/M15→120 | M30→100 | H1→80 | H4→
 console.log(`⚡ Tick timeout: 350ms | Candles + Tick em paralelo | analiseRefinada em paralelo`);
 console.log(`🏷️  Deteção de ativo: 9 tipos (volatility/boom/crash/jump/step/commodity/cripto/forex/normal)`);
 console.log(`💧 Liquidity Hunter Robusto ativo`);
-console.log(`⏳ Trava de timing ativa (força HOLD se M1/M5/M15 = AGUARDAR)`);
 try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
 catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
