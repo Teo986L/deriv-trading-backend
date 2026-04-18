@@ -1,10 +1,7 @@
 // liquidity-hunter-robusto.js
 // Caça à liquidez profissional para Deriv (dados reais)
-// Funciona com SNIPER, CAÇADOR, PESCADOR
+// Versão 2.2 - Follow-through mínimo + Peso por nível + Epoch robusto + Filtro de tendência forte
 
-/**
- * CONFIGURAÇÕES POR MODO
- */
 const MODE_CONFIG = {
     SNIPER: {
         primaryTimeframe: 'M1',
@@ -19,7 +16,7 @@ const MODE_CONFIG = {
         minAdxToOverride: 25,
         useTickVolume: true,
         minTickVolumeSpike: 1.5,
-        psychologicalPrecision: 0.001
+        psychologicalPrecision: null
     },
     CAÇADOR: {
         primaryTimeframe: 'M5',
@@ -34,7 +31,7 @@ const MODE_CONFIG = {
         minAdxToOverride: 22,
         useTickVolume: true,
         minTickVolumeSpike: 1.5,
-        psychologicalPrecision: 0.001
+        psychologicalPrecision: null
     },
     PESCADOR: {
         primaryTimeframe: 'H1',
@@ -49,13 +46,26 @@ const MODE_CONFIG = {
         minAdxToOverride: 20,
         useTickVolume: true,
         minTickVolumeSpike: 1.5,
-        psychologicalPrecision: 0.001
+        psychologicalPrecision: null
     }
 };
 
-/**
- * Calcula ATR a partir de candles
- */
+// Pesos para escolha do melhor nível dentro de uma zona
+const LEVEL_TYPE_WEIGHT = {
+    'HIGH': 3,
+    'LOW': 3,
+    'SR': 2,
+    'PSYCHOLOGICAL': 1
+};
+
+function getDynamicPrecision(price) {
+    if (price >= 10000) return 10.0;
+    if (price >= 1000) return 1.0;
+    if (price >= 100) return 0.1;
+    if (price >= 10) return 0.01;
+    return 0.001;
+}
+
 function calculateATR(candles, period = 14) {
     if (!candles || candles.length < period + 1) return null;
     let trSum = 0;
@@ -69,16 +79,10 @@ function calculateATR(candles, period = 14) {
     return trSum / period;
 }
 
-/**
- * Obtém a contagem de ticks por candle
- */
 function getTickVolume(candle) {
     return candle.tick_count || candle.tick_volume || 0;
 }
 
-/**
- * Média de tick volume nos últimos N candles
- */
 function getAverageTickVolume(candles, lookback = 20) {
     const recent = candles.slice(-lookback);
     let sum = 0, count = 0;
@@ -89,9 +93,6 @@ function getAverageTickVolume(candles, lookback = 20) {
     return count > 0 ? sum / count : 0;
 }
 
-/**
- * Encontra máximas e mínimas para múltiplos lookbacks (otimizada)
- */
 function getMultiLevelHighLow(candles, lookbacks) {
     const resultHighs = {};
     const resultLows = {};
@@ -99,8 +100,7 @@ function getMultiLevelHighLow(candles, lookbacks) {
 
     for (const lb of lookbacks) {
         if (len >= lb) {
-            let maxHigh = -Infinity;
-            let minLow = Infinity;
+            let maxHigh = -Infinity, minLow = Infinity;
             const startIdx = len - lb;
             for (let i = startIdx; i < len; i++) {
                 const c = candles[i];
@@ -117,9 +117,6 @@ function getMultiLevelHighLow(candles, lookbacks) {
     return { highs: resultHighs, lows: resultLows };
 }
 
-/**
- * Detecta níveis de suporte/resistência por toques múltiplos
- */
 function detectSupportResistanceLevels(candles, lookback, tolerance = 0.002, minTouches = 2) {
     const recent = candles.slice(-lookback);
     const levels = new Map();
@@ -141,34 +138,114 @@ function detectSupportResistanceLevels(candles, lookback, tolerance = 0.002, min
     return result;
 }
 
-/**
- * Gera níveis psicológicos (preços redondos)
- */
 function getPsychologicalLevels(currentPrice, precision, rangePercent = 0.02) {
     const levels = [];
+    const step = precision || getDynamicPrecision(currentPrice);
     const range = currentPrice * rangePercent;
-    const step = precision;
     let start = currentPrice - range;
     start = Math.floor(start / step) * step;
     let end = currentPrice + range;
     for (let p = start; p <= end; p += step) {
-        if (Math.abs(p - currentPrice) > 0.0001) levels.push(p);
+        if (Math.abs(p - currentPrice) > step * 0.1) levels.push(p);
     }
     return levels;
 }
 
 /**
- * Verifica se o preço atual está "caçando" um nível específico
+ * Verifica se o sweep foi forte (wick > 1.5 * corpo)
  */
-function checkSweepOnLevel(currentPrice, level, threshold) {
-    if (currentPrice > level + threshold) return 'above';
-    if (currentPrice < level - threshold) return 'below';
-    return null;
+function isStrongRejection(candle, direction) {
+    const body = Math.abs(candle.close - candle.open);
+    if (body === 0) return true;
+    if (direction === 'above') {
+        const wick = candle.high - Math.max(candle.open, candle.close);
+        return wick > body * 1.5;
+    } else {
+        const wick = Math.min(candle.open, candle.close) - candle.low;
+        return wick > body * 1.5;
+    }
 }
 
 /**
- * Função principal de detecção de sweep de liquidez
+ * Verifica se houve sweep real E FORTE no último candle fechado
  */
+function isRealSweep(candles, level, direction, threshold) {
+    if (!candles || candles.length < 2) return false;
+    const lastClosed = candles[candles.length - 2];
+    
+    if (direction === 'above') {
+        if (lastClosed.high > level + threshold && lastClosed.close < level) {
+            return isStrongRejection(lastClosed, 'above');
+        }
+    } else {
+        if (lastClosed.low < level - threshold && lastClosed.close > level) {
+            return isStrongRejection(lastClosed, 'below');
+        }
+    }
+    return false;
+}
+
+/**
+ * Confirma se o mercado está seguindo na direção esperada após o sweep
+ * com um deslocamento MÍNIMO significativo
+ */
+function confirmFollowThrough(candles, direction, threshold) {
+    if (candles.length < 2) return false;
+    const sweepCandle = candles[candles.length - 2];
+    const currentCandle = candles[candles.length - 1];
+    
+    const move = Math.abs(currentCandle.close - sweepCandle.close);
+    const minMove = threshold * 0.3; // exigir pelo menos 30% do threshold de movimento
+    
+    if (direction === 'PUT') {
+        return currentCandle.close < sweepCandle.close && move >= minMove;
+    } else {
+        return currentCandle.close > sweepCandle.close && move >= minMove;
+    }
+}
+
+/**
+ * Normaliza o epoch do candle (trata segundos vs milissegundos)
+ */
+function getCandleEpochSec(candle) {
+    if (!candle) return null;
+    let epoch = candle.epoch || candle.open_time;
+    if (!epoch) return null;
+    // Se for maior que 1e12 (ano 33658), está em milissegundos
+    return epoch > 1e12 ? Math.floor(epoch / 1000) : epoch;
+}
+
+/**
+ * Agrupa níveis próximos em zonas e escolhe o melhor nível baseado em pesos
+ */
+function groupNearbyLevels(levels, threshold) {
+    if (levels.length === 0) return [];
+    const sorted = [...levels].sort((a, b) => a.price - b.price);
+    const zones = [];
+    let currentZone = [sorted[0]];
+    
+    for (let i = 1; i < sorted.length; i++) {
+        const prev = currentZone[currentZone.length - 1];
+        if (Math.abs(sorted[i].price - prev.price) <= threshold * 2) {
+            currentZone.push(sorted[i]);
+        } else {
+            zones.push(currentZone);
+            currentZone = [sorted[i]];
+        }
+    }
+    zones.push(currentZone);
+    
+    // Para cada zona, escolher o nível com maior peso (tipo * peso + toques)
+    return zones.map(zone => {
+        const best = zone.reduce((a, b) => {
+            const weightA = (LEVEL_TYPE_WEIGHT[a.type?.split('_')[0]] || 1) + (a.touches || 0) * 0.5;
+            const weightB = (LEVEL_TYPE_WEIGHT[b.type?.split('_')[0]] || 1) + (b.touches || 0) * 0.5;
+            return weightA > weightB ? a : b;
+        });
+        return { ...best, zoneSize: zone.length };
+    });
+}
+
 function detectLiquiditySweepRobusto({
     mode,
     currentPrice,
@@ -184,126 +261,142 @@ function detectLiquiditySweepRobusto({
     const primaryTF = config.primaryTimeframe;
     const candles = candlesMap[primaryTF];
 
-    if (!candles || candles.length < 20) {
-        return { sweepDetected: false, reason: `Candles insuficientes para ${primaryTF} (${candles?.length || 0} disponíveis, mínimo 20)` };
+    const maxLookback = Math.max(...config.lookbacks);
+    if (!candles || candles.length < Math.max(20, maxLookback)) {
+        return { sweepDetected: false, reason: `Candles insuficientes para ${primaryTF}` };
     }
 
-    const effectiveLookbacks = config.lookbacks.map(lb => Math.min(lb, candles.length - 1)).filter(lb => lb >= 10);
+    const effectiveLookbacks = config.lookbacks.map(lb => Math.min(lb, candles.length - 2)).filter(lb => lb >= 10);
     if (effectiveLookbacks.length === 0) {
-        return { sweepDetected: false, reason: `Candles insuficientes para calcular lookbacks em ${primaryTF}` };
+        return { sweepDetected: false, reason: `Lookbacks inválidos para ${primaryTF}` };
     }
 
-    // 1. Calcular threshold
     let threshold = atrValue && atrValue > 0
         ? atrValue * config.thresholdATRMultiplier
         : currentPrice * config.thresholdPercent;
-    const minThreshold = currentPrice * 0.0005;
-    threshold = Math.max(threshold, minThreshold);
+    threshold = Math.max(threshold, currentPrice * 0.0005);
 
-    // 2. Múltiplos níveis de liquidez
     const { highs, lows } = getMultiLevelHighLow(candles, effectiveLookbacks);
-    const allLevels = [];
+    let allLevels = [];
 
     for (const lb of effectiveLookbacks) {
-        if (highs[lb] !== null) {
-            allLevels.push({ price: highs[lb], type: `HIGH_${lb}`, lookback: lb, direction: 'above' });
-        }
-        if (lows[lb] !== null) {
-            allLevels.push({ price: lows[lb], type: `LOW_${lb}`, lookback: lb, direction: 'below' });
-        }
+        if (highs[lb] !== null) allLevels.push({ price: highs[lb], type: `HIGH_${lb}`, lookback: lb, direction: 'above', touches: 1 });
+        if (lows[lb] !== null) allLevels.push({ price: lows[lb], type: `LOW_${lb}`, lookback: lb, direction: 'below', touches: 1 });
     }
 
-    // 3. Níveis de suporte/resistência
     const srLookback = Math.min(100, candles.length - 1);
     const srLevels = detectSupportResistanceLevels(candles, srLookback, threshold * 0.5, config.minTouchCount);
     for (const lvl of srLevels) {
         allLevels.push({ price: lvl.price, type: 'SR', touches: lvl.touches, direction: 'both' });
     }
 
-    // 4. Níveis psicológicos
-    const psyLevels = getPsychologicalLevels(currentPrice, config.psychologicalPrecision, 0.02);
+    const precision = getDynamicPrecision(currentPrice);
+    const psyLevels = getPsychologicalLevels(currentPrice, precision, 0.02);
     for (const pl of psyLevels) {
-        allLevels.push({ price: pl, type: 'PSYCHOLOGICAL', direction: 'both' });
+        allLevels.push({ price: pl, type: 'PSYCHOLOGICAL', touches: 1, direction: 'both' });
     }
 
-    // 5. Verificar sweep em cada nível
+    // Agrupar níveis próximos para evitar sinais conflitantes
+    const groupedLevels = groupNearbyLevels(allLevels, threshold);
     let bestSweep = null;
-    for (const level of allLevels) {
+
+    // Obter tendência do timeframe primário para filtro de tendência forte
+    const primaryAnalysis = analysisMap[primaryTF];
+    const primaryADX = primaryAnalysis?.adx || 0;
+    const primaryTrend = primaryAnalysis?.sinal || 'HOLD';
+
+    for (const level of groupedLevels) {
         let direction = null;
+        let isSweep = false;
+
         if (level.direction === 'above' || level.direction === 'both') {
-            const check = checkSweepOnLevel(currentPrice, level.price, threshold);
-            if (check === 'above') direction = 'PUT';
+            if (isRealSweep(candles, level.price, 'above', threshold)) {
+                direction = 'PUT';
+                isSweep = true;
+            }
         }
-        if (level.direction === 'below' || level.direction === 'both') {
-            const check = checkSweepOnLevel(currentPrice, level.price, threshold);
-            if (check === 'below') direction = 'CALL';
+        if (!isSweep && (level.direction === 'below' || level.direction === 'both')) {
+            if (isRealSweep(candles, level.price, 'below', threshold)) {
+                direction = 'CALL';
+                isSweep = true;
+            }
         }
-        if (!direction) continue;
+        if (!isSweep) continue;
+
+        // Confirmar follow-through com movimento mínimo
+        if (!confirmFollowThrough(candles, direction, threshold)) {
+            continue; // mercado não confirmou com força
+        }
 
         let confidence = 65;
-        let reasons = [];
+        let reasons = [`Sweep real com rejeição forte`];
 
-        // Filtro de volume
-        if (config.useTickVolume) {
-            const avgVolume = getAverageTickVolume(candles, 20);
-            const lastVolume = getTickVolume(candles[candles.length - 1]);
-            if (avgVolume > 0 && lastVolume > avgVolume * config.minTickVolumeSpike) {
-                confidence += 15;
-                reasons.push(`Volume spike (${lastVolume} vs avg ${avgVolume.toFixed(0)})`);
-            } else if (avgVolume > 0 && lastVolume < avgVolume * 0.5) {
-                confidence -= 20;
-                reasons.push(`Volume baixo (possível falso)`);
-            }
-        }
-
-        // Idade do sweep
-        const lastCandle = candles[candles.length - 1];
+        const lastClosed = candles[candles.length - 2];
+        const epochSec = getCandleEpochSec(lastClosed);
+        if (!epochSec) continue;
+        
         const nowSec = Math.floor(Date.now() / 1000);
-        const candleAgeSec = nowSec - (lastCandle.epoch || lastCandle.open_time);
+        const candleAgeSec = nowSec - epochSec;
         if (candleAgeSec > config.maxSweepAgeSeconds) continue;
 
-        // Confirmação por distância
+        // Filtro de tendência forte: reduzir confiança se for contra um ADX > 30
+        if (primaryADX > 30) {
+            if ((direction === 'CALL' && primaryTrend === 'PUT') || (direction === 'PUT' && primaryTrend === 'CALL')) {
+                confidence -= 25;
+                reasons.push(`Contra tendência forte (ADX ${primaryADX.toFixed(1)})`);
+            } else if ((direction === 'CALL' && primaryTrend === 'CALL') || (direction === 'PUT' && primaryTrend === 'PUT')) {
+                confidence += 15;
+                reasons.push(`A favor da tendência forte`);
+            }
+        }
+
         const distance = direction === 'PUT' ? currentPrice - level.price : level.price - currentPrice;
-        if (distance < threshold * 0.5) {
+        if (distance < threshold * 0.7) {
             confidence += 10;
             reasons.push(`Preço próximo ao nível`);
-        } else {
-            confidence -= 5;
+        } else if (distance > threshold * 2) {
+            confidence -= 10;
         }
 
-        // Contexto de timeframe superior
+        if (config.useTickVolume) {
+            const avgVolume = getAverageTickVolume(candles, 20);
+            const lastVolume = getTickVolume(lastClosed);
+            if (avgVolume > 0 && lastVolume > avgVolume * config.minTickVolumeSpike) {
+                confidence += 8;
+                reasons.push(`Volume elevado`);
+            } else if (avgVolume > 0 && lastVolume < avgVolume * 0.5) {
+                confidence -= 12;
+                reasons.push(`Volume baixo`);
+            }
+        }
+
         const secondaryTF = config.secondaryTimeframe;
         const tertiaryTF = config.tertiaryTimeframe;
-        if (analysisMap[secondaryTF] && analysisMap[secondaryTF].adx) {
-            const adxSec = analysisMap[secondaryTF].adx;
+        if (analysisMap[secondaryTF]?.adx > config.minAdxToOverride) {
             const trendSec = analysisMap[secondaryTF].sinal;
-            if (adxSec > config.minAdxToOverride && trendSec !== 'HOLD') {
+            if (trendSec !== 'HOLD') {
                 if ((direction === 'CALL' && trendSec === 'PUT') || (direction === 'PUT' && trendSec === 'CALL')) {
-                    confidence -= 25;
-                    reasons.push(`Tendência forte contra no ${secondaryTF}`);
+                    confidence -= 20;
+                    reasons.push(`Contra tendência no ${secondaryTF}`);
                 } else {
-                    confidence += 15;
-                    reasons.push(`Sweep a favor da tendência no ${secondaryTF}`);
+                    confidence += 12;
+                    reasons.push(`A favor da tendência no ${secondaryTF}`);
                 }
             }
         }
-        if (analysisMap[tertiaryTF] && analysisMap[tertiaryTF].adx) {
-            const adxTer = analysisMap[tertiaryTF].adx;
+        if (analysisMap[tertiaryTF]?.adx > 25) {
             const trendTer = analysisMap[tertiaryTF].sinal;
-            if (adxTer > 25) {
-                if ((direction === 'CALL' && trendTer === 'PUT') || (direction === 'PUT' && trendTer === 'CALL')) {
-                    confidence -= 15;
-                } else {
-                    confidence += 10;
-                }
+            if ((direction === 'CALL' && trendTer === 'PUT') || (direction === 'PUT' && trendTer === 'CALL')) {
+                confidence -= 10;
+            } else {
+                confidence += 8;
             }
         }
 
-        // RSI extremo
-        if (analysisMap[primaryTF] && analysisMap[primaryTF].rsi) {
+        if (analysisMap[primaryTF]?.rsi) {
             const rsi = analysisMap[primaryTF].rsi;
-            if (direction === 'PUT' && rsi > 70) confidence += 10;
-            if (direction === 'CALL' && rsi < 30) confidence += 10;
+            if (direction === 'PUT' && rsi > 70) confidence += 8;
+            if (direction === 'CALL' && rsi < 30) confidence += 8;
         }
 
         confidence = Math.min(100, Math.max(0, confidence));
@@ -323,7 +416,7 @@ function detectLiquiditySweepRobusto({
     }
 
     if (!bestSweep) {
-        return { sweepDetected: false, reason: 'Nenhum sweep relevante' };
+        return { sweepDetected: false, reason: 'Nenhum sweep real confirmado' };
     }
 
     return {
