@@ -1056,20 +1056,27 @@ const client = await getDerivClient();
 
 const timeframesToAnalyze_keys = TRADING_MODES[mode].timeframes;
 
-const mtfManager = new MultiTimeframeManager(symbol);
-
-// Detectar tipo de ativo — 9 tipos
+// Detectar tipo de ativo — 9 tipos (cobre todos os símbolos do frontend)
 const tipoAtivo = (() => {
+  // Volatility Index: R_10, R_25, R_50 / 1HZ15V, 1HZ75V, 1HZ90V, 1HZ100V, 1HZ150V, 1HZ250V
   if (symbol.startsWith('R_') || symbol.startsWith('1HZ')) return 'volatility_index';
-  if (/BOOM/i.test(symbol))                                  return 'boom_index';
-  if (/CRASH/i.test(symbol))                                 return 'crash_index';
-  if (symbol.startsWith('JD'))                               return 'jump_index';
-  if (/stpRNG/i.test(symbol))                                return 'step_index';
-  if (symbol.includes('frxXAU') || symbol.includes('frxXAG')) return 'commodity';
-  if (/^cry/i.test(symbol))                                  return 'criptomoeda';
-  if (symbol.startsWith('frx'))                              return 'forex';
+  // Boom Index: BOOM150N, BOOM300N, BOOM500, BOOM600, BOOM900, BOOM1000
+  if (/^BOOM/i.test(symbol))  return 'boom_index';
+  // Crash Index: CRASH150N, CRASH300N, CRASH500, CRASH600, CRASH1000
+  if (/^CRASH/i.test(symbol)) return 'crash_index';
+  // Jump Index: JD50, JD100, JD200...
+  if (/^JD/i.test(symbol))    return 'jump_index';
+  // Step Index: stpRNG, stpRNG2, stpRNG3, stpRNG4, stpRNG5
+  if (/^stpRNG/i.test(symbol)) return 'step_index';
+  // Commodity: frxXAUUSD (ouro), frxXAGUSD (prata)
+  if (symbol.includes('XAU') || symbol.includes('XAG')) return 'commodity';
+  // Criptomoedas: cryBTCUSD, cryETHUSD, cryLTCUSD...
+  if (/^cry/i.test(symbol))   return 'criptomoeda';
+  // Forex: frxEURUSD, frxGBPUSD, frxUSDJPY...
+  if (/^frx/i.test(symbol))   return 'forex';
   return 'indice_normal';
 })();
+console.log(`🏷️ Tipo ativo: ${tipoAtivo} (símbolo: ${symbol})`);
 
 // Para criptomoedas reduzir candleCount para 80 (velocidade)
 const timeframesToAnalyze = timeframesToAnalyze_keys.map(tfKey => {
@@ -1077,6 +1084,14 @@ const timeframesToAnalyze = timeframesToAnalyze_keys.map(tfKey => {
   if (tipoAtivo === 'criptomoeda') tf.candleCount = 80;
   return tf;
 });
+
+const mtfManager = new MultiTimeframeManager(symbol);
+// Sobrepor o tipo detetado internamente pelo mtfManager com o nosso (mais completo)
+if (typeof mtfManager.setTipoAtivo === 'function') {
+  mtfManager.setTipoAtivo(tipoAtivo);
+} else if (mtfManager.tipoAtivo !== undefined) {
+  mtfManager.tipoAtivo = tipoAtivo;
+}
 
 const sistemaBase = new SistemaAnaliseInteligente(symbol);
 
@@ -1155,6 +1170,9 @@ console.error(`❌ Erro ao analisar ${tf.key}:`, err.message);
 
 const consolidated = mtfManager.consolidateSignals();
 const agreement = mtfManager.calculateAgreement();
+
+// Garantir que o tipo ativo correto (detetado no servidor) é propagado
+consolidated.tipo_ativo = tipoAtivo;
 
 const timeframesSignals = [];
 for (const tfKey of TRADING_MODES[mode].timeframes) {
@@ -1393,6 +1411,7 @@ timeframesAnalyzed: agreement.totalTimeframes,
 sinal_premium: consolidated.sinal_premium || null,
 price: currentPrice,
 priceSource: priceSource,
+tipo_ativo: tipoAtivo,
 ...(m1Timing && { m1_timing: m1Timing }),
 ...(m5Timing && { m5_timing: m5Timing }),
 ...(m15Timing && { m15_timing: m15Timing }),
@@ -1437,7 +1456,7 @@ timestamp: new Date().toISOString()
 }
 };
 
-console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Tipo ativo: ${consolidated.tipo_ativo}`);
+console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Tipo ativo: ${tipoAtivo}`);
 res.json(response);
 
 } catch (error) {
