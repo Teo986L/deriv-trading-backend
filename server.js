@@ -150,75 +150,89 @@ return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
 const inFlightRequests = new Map();
 
 async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false) {
-const cacheKey = `candles:${symbol}:${tf.key}`;
-const ttl = getTTLAlignedToCandle(tf.seconds);
-console.log(`⏱️ TTL ${tf.key}: ${ttl}s (candle fecha em ~${ttl + CANDLE_CLOSE_MARGIN}s)`);
+  const cacheKey = `candles:${symbol}:${tf.key}`;
+  let ttl = getTTLAlignedToCandle(tf.seconds);
 
-if (redisClient && redisClient.isReady && !forceFresh) {
-try {
-const cached = await redisClient.get(cacheKey);
-if (cached) {
-const remainingTTL = await redisClient.ttl(cacheKey);
-console.log(`✅ Cache hit: ${cacheKey} (TTL restante: ${remainingTTL}s)`);
+  // ========== NOVO: TTL MÍNIMO POR TIMEFRAME ==========
+  const minTTL = tf.seconds >= 3600 ? 1800      // H1, H4, H24: mínimo 30 minutos
+               : tf.seconds >= 900  ? 600       // M15: mínimo 10 minutos
+               : tf.seconds >= 300  ? 180       // M5: mínimo 3 minutos
+               : 60;                            // M1: mínimo 1 minuto
+  ttl = Math.max(ttl, minTTL);
 
-if (remainingTTL <= CANDLE_CLOSE_MARGIN) {
-setImmediate(async () => {
-try {
-console.log(`🔄 Pré-carregando novo candle em background: ${cacheKey}`);
-const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
-if (Array.isArray(freshCandles)) {
-const newTtl = getTTLAlignedToCandle(tf.seconds);
-await redisClient.setEx(cacheKey, newTtl, JSON.stringify(freshCandles));
-console.log(`✅ Cache pré-carregado: ${cacheKey} (novo TTL: ${newTtl}s)`);
-}
-} catch (err) {
-console.error(`❌ Erro pré-carregando cache: ${err.message}`);
-}
-});
-}
+  // Bônus para criptomoedas (API mais lenta)
+  if (symbol.startsWith('cry')) {
+    const cryptoBonus = tf.seconds >= 3600 ? 3600 : 900;
+    ttl = Math.max(ttl, cryptoBonus);
+  }
 
-return JSON.parse(cached);
-}
-} catch (err) {
-console.error(`❌ Erro lendo Redis para ${cacheKey}:`, err.message);
-}
-}
+  console.log(`⏱️ TTL ${tf.key}: ${ttl}s (candle fecha em ~${ttl + CANDLE_CLOSE_MARGIN}s)${symbol.startsWith('cry') ? ' [CRIPTO]' : ''}`);
 
-if (inFlightRequests.has(cacheKey)) {
-console.log(`⏳ Aguardando requisição em voo para ${cacheKey}`);
-return inFlightRequests.get(cacheKey);
-}
+  if (redisClient && redisClient.isReady && !forceFresh) {
+    try {
+      const cached = await redisClient.get(cacheKey);
+      if (cached) {
+        const remainingTTL = await redisClient.ttl(cacheKey);
+        console.log(`✅ Cache hit: ${cacheKey} (TTL restante: ${remainingTTL}s)`);
 
-const fetchPromise = (async () => {
-try {
-console.log(`🔄 Buscando ${tf.key} direto da Deriv (${tf.candleCount} candles) - modo ${mode}`);
-const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+        if (remainingTTL <= CANDLE_CLOSE_MARGIN) {
+          setImmediate(async () => {
+            try {
+              console.log(`🔄 Pré-carregando novo candle em background: ${cacheKey}`);
+              const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+              if (Array.isArray(freshCandles)) {
+                const newTtl = Math.max(getTTLAlignedToCandle(tf.seconds), minTTL);
+                await redisClient.setEx(cacheKey, newTtl, JSON.stringify(freshCandles));
+                console.log(`✅ Cache pré-carregado: ${cacheKey} (novo TTL: ${newTtl}s)`);
+              }
+            } catch (err) {
+              console.error(`❌ Erro pré-carregando cache: ${err.message}`);
+            }
+          });
+        }
 
-if (!Array.isArray(candles)) {
-console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
-return candles;
-}
+        return JSON.parse(cached);
+      }
+    } catch (err) {
+      console.error(`❌ Erro lendo Redis para ${cacheKey}:`, err.message);
+    }
+  }
 
-console.log(`📊 ${tf.key}: recebidos ${candles.length} candles`);
+  if (inFlightRequests.has(cacheKey)) {
+    console.log(`⏳ Aguardando requisição em voo para ${cacheKey}`);
+    return inFlightRequests.get(cacheKey);
+  }
 
-if (candles.length < tf.minRequired) {
-console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
-}
+  const fetchPromise = (async () => {
+    try {
+      console.log(`🔄 Buscando ${tf.key} direto da Deriv (${tf.candleCount} candles) - modo ${mode}`);
+      const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
 
-if (redisClient && redisClient.isReady) {
-redisClient.setEx(cacheKey, ttl, JSON.stringify(candles))
-.then(() => console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`))
-.catch(err => console.error(`❌ Erro salvando cache: ${err.message}`));
-}
+      if (!Array.isArray(candles)) {
+        console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
+        return candles;
+      }
 
-return candles;
-} finally {
-inFlightRequests.delete(cacheKey);
-}
-})();
+      console.log(`📊 ${tf.key}: recebidos ${candles.length} candles`);
 
-inFlightRequests.set(cacheKey, fetchPromise);
-return fetchPromise;
+      if (candles.length < tf.minRequired) {
+        console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
+      }
+
+      if (redisClient && redisClient.isReady) {
+        redisClient.setEx(cacheKey, ttl, JSON.stringify(candles))
+          .then(() => console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`))
+          .catch(err => console.error(`❌ Erro salvando cache: ${err.message}`));
+      }
+
+      return candles;
+    } finally {
+      inFlightRequests.delete(cacheKey);
+    }
+  })();
+
+  inFlightRequests.set(cacheKey, fetchPromise);
+  return fetchPromise;
 }
 
 const analyzeLimiter = rateLimit({
@@ -705,9 +719,9 @@ return 'unknown';
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
 const startTime = Date.now();
 let mtfManager = null;
-let candlesMap = {};        // ⚠️ Agora é LET
+let candlesMap = {};
 let historicalCandles = null;
-let analysisMap = {};       // ⚠️ Agora é LET
+let analysisMap = {};
 
 try {
 const { symbol, mode } = req.body;
@@ -718,7 +732,15 @@ console.log(`\n🎯 Modo selecionado: ${mode} - ${TRADING_MODES[mode].descriptio
 console.log(`📊 Timeframes a analisar: ${TRADING_MODES[mode].timeframes.join(', ')}`);
 
 const client = await getDerivClient();
-const timeframesToAnalyze = TRADING_MODES[mode].timeframes.map(tfKey => ALL_TIMEFRAMES_CONFIG[tfKey]);
+let timeframesToAnalyze = TRADING_MODES[mode].timeframes.map(tfKey => {
+  const tf = { ...ALL_TIMEFRAMES_CONFIG[tfKey] };
+  // Reduz candleCount para criptomoedas (API lenta)
+  if (symbol.startsWith('cry')) {
+    tf.candleCount = Math.min(tf.candleCount, 80);
+  }
+  return tf;
+});
+
 mtfManager = new MultiTimeframeManager(symbol);
 
 const tipoAtivo = (() => {
@@ -747,7 +769,7 @@ const allTfKeysToFetch = Array.from(new Set([atrTimeframeKey, ...TRADING_MODES[m
 console.log(`⚡ Buscando ${allTfKeysToFetch.length} timeframes em paralelo: ${allTfKeysToFetch.join(', ')}`);
 
 await Promise.all(allTfKeysToFetch.map(async (tfKey) => {
-  const tf = ALL_TIMEFRAMES_CONFIG[tfKey];
+  const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
   if (!tf) return;
   try {
     const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
@@ -830,8 +852,7 @@ if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
     console.log(`💰 Preço base via fallback (${firstTf}): ${currentPrice}`);
 }
 
-// Agora, tenta obter o tick, mas NÃO ESPERA mais que 200ms.
-// Se o tick já tiver chegado, ótimo. Se não, segue com o preço do M1.
+// Tenta obter o tick, mas não espera mais que 200ms
 const tickTimeout = new Promise((resolve) => setTimeout(() => resolve(null), 200));
 const tickResult = await Promise.race([tickPromise, tickTimeout]);
 
@@ -842,6 +863,19 @@ if (tickResult) {
 } else {
     console.log(`💰 Preço final via ${priceSource} (tick não disponível em 200ms)`);
 }
+
+// ========== PREENCHER analysisMap (CRÍTICO PARA LIQUIDEZ) ==========
+for (const tfKey of TRADING_MODES[mode].timeframes) {
+    const analysis = mtfManager.timeframes[tfKey]?.analysis;
+    if (analysis) {
+        analysisMap[tfKey] = {
+            adx: analysis.adx,
+            rsi: analysis.rsi,
+            sinal: analysis.sinal
+        };
+    }
+}
+// =================================================================
 
 const atrCandles = candlesMap[atrTimeframeKey];
 const atrValue = atrCandles ? calculateATR(atrCandles) : null;
@@ -911,12 +945,11 @@ const response = {
   metadata: { responseTimeMs: responseTime, timestamp: new Date().toISOString() }
 };
 
-// ========== LIMPEZA EXPLÍCITA (AGORA COM VARIÁVEIS LET) ==========
+// Limpeza
 if (mtfManager) { mtfManager.timeframes = {}; mtfManager.allAnalyses = {}; }
 candlesMap = null;
 historicalCandles = null;
 analysisMap = null;
-// =============================================================
 
 console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Tipo ativo: ${consolidated.tipo_ativo}`);
 res.json(response);
@@ -937,7 +970,7 @@ console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).jo
 console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
 console.log(`📊 Configuração de candles: M1/M5/M15=150 | M30=120 | H1=100 | H4=80 | H24=60`);
 console.log(`🤖 TraderBotAnalise integrado`);
-console.log(`💧 Caça à liquidez robusta ativada`);
+console.log(`💧 Caça à liquidez robusta ativada (com TTL mínimo)`);
 console.log(`🧠 [MEMÓRIA] Inicie com: node --max-old-space-size=512 server.js`);
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
