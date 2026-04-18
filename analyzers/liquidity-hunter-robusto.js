@@ -1,6 +1,6 @@
 // liquidity-hunter-robusto.js
 // Caça à liquidez profissional para Deriv (dados reais)
-// Versão 2.2 - Follow-through mínimo + Peso por nível + Epoch robusto + Filtro de tendência forte
+// Versão 2.3 - Calibragem equilibrada (mais sinais, mesma qualidade)
 
 const MODE_CONFIG = {
     SNIPER: {
@@ -138,7 +138,7 @@ function detectSupportResistanceLevels(candles, lookback, tolerance = 0.002, min
     return result;
 }
 
-function getPsychologicalLevels(currentPrice, precision, rangePercent = 0.02) {
+function getPsychologicalLevels(currentPrice, precision, rangePercent = 0.015) {
     const levels = [];
     const step = precision || getDynamicPrecision(currentPrice);
     const range = currentPrice * rangePercent;
@@ -151,24 +151,18 @@ function getPsychologicalLevels(currentPrice, precision, rangePercent = 0.02) {
     return levels;
 }
 
-/**
- * Verifica se o sweep foi forte (wick > 1.5 * corpo)
- */
 function isStrongRejection(candle, direction) {
     const body = Math.abs(candle.close - candle.open);
     if (body === 0) return true;
     if (direction === 'above') {
         const wick = candle.high - Math.max(candle.open, candle.close);
-        return wick > body * 1.5;
+        return wick > body * 1.2;   // ← Relaxado de 1.5 para 1.2
     } else {
         const wick = Math.min(candle.open, candle.close) - candle.low;
-        return wick > body * 1.5;
+        return wick > body * 1.2;
     }
 }
 
-/**
- * Verifica se houve sweep real E FORTE no último candle fechado
- */
 function isRealSweep(candles, level, direction, threshold) {
     if (!candles || candles.length < 2) return false;
     const lastClosed = candles[candles.length - 2];
@@ -185,17 +179,13 @@ function isRealSweep(candles, level, direction, threshold) {
     return false;
 }
 
-/**
- * Confirma se o mercado está seguindo na direção esperada após o sweep
- * com um deslocamento MÍNIMO significativo
- */
 function confirmFollowThrough(candles, direction, threshold) {
     if (candles.length < 2) return false;
     const sweepCandle = candles[candles.length - 2];
     const currentCandle = candles[candles.length - 1];
     
     const move = Math.abs(currentCandle.close - sweepCandle.close);
-    const minMove = threshold * 0.3; // exigir pelo menos 30% do threshold de movimento
+    const minMove = threshold * 0.15;   // ← Relaxado de 0.3 para 0.15
     
     if (direction === 'PUT') {
         return currentCandle.close < sweepCandle.close && move >= minMove;
@@ -204,20 +194,13 @@ function confirmFollowThrough(candles, direction, threshold) {
     }
 }
 
-/**
- * Normaliza o epoch do candle (trata segundos vs milissegundos)
- */
 function getCandleEpochSec(candle) {
     if (!candle) return null;
     let epoch = candle.epoch || candle.open_time;
     if (!epoch) return null;
-    // Se for maior que 1e12 (ano 33658), está em milissegundos
     return epoch > 1e12 ? Math.floor(epoch / 1000) : epoch;
 }
 
-/**
- * Agrupa níveis próximos em zonas e escolhe o melhor nível baseado em pesos
- */
 function groupNearbyLevels(levels, threshold) {
     if (levels.length === 0) return [];
     const sorted = [...levels].sort((a, b) => a.price - b.price);
@@ -235,7 +218,6 @@ function groupNearbyLevels(levels, threshold) {
     }
     zones.push(currentZone);
     
-    // Para cada zona, escolher o nível com maior peso (tipo * peso + toques)
     return zones.map(zone => {
         const best = zone.reduce((a, b) => {
             const weightA = (LEVEL_TYPE_WEIGHT[a.type?.split('_')[0]] || 1) + (a.touches || 0) * 0.5;
@@ -291,16 +273,14 @@ function detectLiquiditySweepRobusto({
     }
 
     const precision = getDynamicPrecision(currentPrice);
-    const psyLevels = getPsychologicalLevels(currentPrice, precision, 0.02);
+    const psyLevels = getPsychologicalLevels(currentPrice, precision, 0.015); // range reduzido
     for (const pl of psyLevels) {
         allLevels.push({ price: pl, type: 'PSYCHOLOGICAL', touches: 1, direction: 'both' });
     }
 
-    // Agrupar níveis próximos para evitar sinais conflitantes
     const groupedLevels = groupNearbyLevels(allLevels, threshold);
     let bestSweep = null;
 
-    // Obter tendência do timeframe primário para filtro de tendência forte
     const primaryAnalysis = analysisMap[primaryTF];
     const primaryADX = primaryAnalysis?.adx || 0;
     const primaryTrend = primaryAnalysis?.sinal || 'HOLD';
@@ -323,13 +303,12 @@ function detectLiquiditySweepRobusto({
         }
         if (!isSweep) continue;
 
-        // Confirmar follow-through com movimento mínimo
         if (!confirmFollowThrough(candles, direction, threshold)) {
-            continue; // mercado não confirmou com força
+            continue;
         }
 
-        let confidence = 65;
-        let reasons = [`Sweep real com rejeição forte`];
+        let confidence = 60;  // ← Base ligeiramente menor
+        let reasons = [`Sweep real c/ rejeição`];
 
         const lastClosed = candles[candles.length - 2];
         const epochSec = getCandleEpochSec(lastClosed);
@@ -339,10 +318,10 @@ function detectLiquiditySweepRobusto({
         const candleAgeSec = nowSec - epochSec;
         if (candleAgeSec > config.maxSweepAgeSeconds) continue;
 
-        // Filtro de tendência forte: reduzir confiança se for contra um ADX > 30
+        // Filtro de tendência: só reduz se for CONTRA uma tendência forte
         if (primaryADX > 30) {
             if ((direction === 'CALL' && primaryTrend === 'PUT') || (direction === 'PUT' && primaryTrend === 'CALL')) {
-                confidence -= 25;
+                confidence -= 20;
                 reasons.push(`Contra tendência forte (ADX ${primaryADX.toFixed(1)})`);
             } else if ((direction === 'CALL' && primaryTrend === 'CALL') || (direction === 'PUT' && primaryTrend === 'PUT')) {
                 confidence += 15;
@@ -351,10 +330,10 @@ function detectLiquiditySweepRobusto({
         }
 
         const distance = direction === 'PUT' ? currentPrice - level.price : level.price - currentPrice;
-        if (distance < threshold * 0.7) {
+        if (distance < threshold * 1.0) {   // ← Mais flexível
             confidence += 10;
             reasons.push(`Preço próximo ao nível`);
-        } else if (distance > threshold * 2) {
+        } else if (distance > threshold * 3) {  // ← Penalidade mais distante
             confidence -= 10;
         }
 
@@ -362,10 +341,10 @@ function detectLiquiditySweepRobusto({
             const avgVolume = getAverageTickVolume(candles, 20);
             const lastVolume = getTickVolume(lastClosed);
             if (avgVolume > 0 && lastVolume > avgVolume * config.minTickVolumeSpike) {
-                confidence += 8;
+                confidence += 5;   // ← Peso reduzido
                 reasons.push(`Volume elevado`);
             } else if (avgVolume > 0 && lastVolume < avgVolume * 0.5) {
-                confidence -= 12;
+                confidence -= 8;
                 reasons.push(`Volume baixo`);
             }
         }
