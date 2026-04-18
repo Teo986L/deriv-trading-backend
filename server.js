@@ -8,10 +8,8 @@ const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
 const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
 const TraderBotAnalise = require('./analyzers/trader-bot-analyzer');
-// ========== LIQUIDEZ ==========
-const { detectLiquiditySweepRobusto, calculateATR } = require('./analyzers/liquidity-hunter-robusto');
-// ====================================
 const { API_TOKEN, CANDLE_CLOSE_TOLERANCE, SMOOTHING } = require('./config');
+const { detectLiquiditySweepRobusto, calculateATR: calcularATRLiquidity } = require('./analyzers/liquidity-hunter-robusto');
 
 const app = express();
 
@@ -150,89 +148,75 @@ return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
 const inFlightRequests = new Map();
 
 async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false) {
-  const cacheKey = `candles:${symbol}:${tf.key}`;
-  let ttl = getTTLAlignedToCandle(tf.seconds);
+const cacheKey = `candles:${symbol}:${tf.key}`;
+const ttl = getTTLAlignedToCandle(tf.seconds);
+console.log(`⏱️ TTL ${tf.key}: ${ttl}s (candle fecha em ~${ttl + CANDLE_CLOSE_MARGIN}s)`);
 
-  // ========== NOVO: TTL MÍNIMO POR TIMEFRAME ==========
-  const minTTL = tf.seconds >= 3600 ? 1800      // H1, H4, H24: mínimo 30 minutos
-               : tf.seconds >= 900  ? 600       // M15: mínimo 10 minutos
-               : tf.seconds >= 300  ? 180       // M5: mínimo 3 minutos
-               : 60;                            // M1: mínimo 1 minuto
-  ttl = Math.max(ttl, minTTL);
+if (redisClient && redisClient.isReady && !forceFresh) {
+try {
+const cached = await redisClient.get(cacheKey);
+if (cached) {
+const remainingTTL = await redisClient.ttl(cacheKey);
+console.log(`✅ Cache hit: ${cacheKey} (TTL restante: ${remainingTTL}s)`);
 
-  // Bônus para criptomoedas (API mais lenta)
-  if (symbol.startsWith('cry')) {
-    const cryptoBonus = tf.seconds >= 3600 ? 3600 : 900;
-    ttl = Math.max(ttl, cryptoBonus);
-  }
+if (remainingTTL <= CANDLE_CLOSE_MARGIN) {
+setImmediate(async () => {
+try {
+console.log(`🔄 Pré-carregando novo candle em background: ${cacheKey}`);
+const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+if (Array.isArray(freshCandles)) {
+const newTtl = getTTLAlignedToCandle(tf.seconds);
+await redisClient.setEx(cacheKey, newTtl, JSON.stringify(freshCandles));
+console.log(`✅ Cache pré-carregado: ${cacheKey} (novo TTL: ${newTtl}s)`);
+}
+} catch (err) {
+console.error(`❌ Erro pré-carregando cache: ${err.message}`);
+}
+});
+}
 
-  console.log(`⏱️ TTL ${tf.key}: ${ttl}s (candle fecha em ~${ttl + CANDLE_CLOSE_MARGIN}s)${symbol.startsWith('cry') ? ' [CRIPTO]' : ''}`);
+return JSON.parse(cached);
+}
+} catch (err) {
+console.error(`❌ Erro lendo Redis para ${cacheKey}:`, err.message);
+}
+}
 
-  if (redisClient && redisClient.isReady && !forceFresh) {
-    try {
-      const cached = await redisClient.get(cacheKey);
-      if (cached) {
-        const remainingTTL = await redisClient.ttl(cacheKey);
-        console.log(`✅ Cache hit: ${cacheKey} (TTL restante: ${remainingTTL}s)`);
+if (inFlightRequests.has(cacheKey)) {
+console.log(`⏳ Aguardando requisição em voo para ${cacheKey}`);
+return inFlightRequests.get(cacheKey);
+}
 
-        if (remainingTTL <= CANDLE_CLOSE_MARGIN) {
-          setImmediate(async () => {
-            try {
-              console.log(`🔄 Pré-carregando novo candle em background: ${cacheKey}`);
-              const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
-              if (Array.isArray(freshCandles)) {
-                const newTtl = Math.max(getTTLAlignedToCandle(tf.seconds), minTTL);
-                await redisClient.setEx(cacheKey, newTtl, JSON.stringify(freshCandles));
-                console.log(`✅ Cache pré-carregado: ${cacheKey} (novo TTL: ${newTtl}s)`);
-              }
-            } catch (err) {
-              console.error(`❌ Erro pré-carregando cache: ${err.message}`);
-            }
-          });
-        }
+const fetchPromise = (async () => {
+try {
+console.log(`🔄 Buscando ${tf.key} direto da Deriv (${tf.candleCount} candles) - modo ${mode}`);
+const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
 
-        return JSON.parse(cached);
-      }
-    } catch (err) {
-      console.error(`❌ Erro lendo Redis para ${cacheKey}:`, err.message);
-    }
-  }
+if (!Array.isArray(candles)) {
+console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
+return candles;
+}
 
-  if (inFlightRequests.has(cacheKey)) {
-    console.log(`⏳ Aguardando requisição em voo para ${cacheKey}`);
-    return inFlightRequests.get(cacheKey);
-  }
+console.log(`📊 ${tf.key}: recebidos ${candles.length} candles`);
 
-  const fetchPromise = (async () => {
-    try {
-      console.log(`🔄 Buscando ${tf.key} direto da Deriv (${tf.candleCount} candles) - modo ${mode}`);
-      const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
+if (candles.length < tf.minRequired) {
+console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
+}
 
-      if (!Array.isArray(candles)) {
-        console.error(`❌ Resposta inválida da Deriv para ${tf.key}: não é um array`);
-        return candles;
-      }
+if (redisClient && redisClient.isReady) {
+redisClient.setEx(cacheKey, ttl, JSON.stringify(candles))
+.then(() => console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`))
+.catch(err => console.error(`❌ Erro salvando cache: ${err.message}`));
+}
 
-      console.log(`📊 ${tf.key}: recebidos ${candles.length} candles`);
+return candles;
+} finally {
+inFlightRequests.delete(cacheKey);
+}
+})();
 
-      if (candles.length < tf.minRequired) {
-        console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
-      }
-
-      if (redisClient && redisClient.isReady) {
-        redisClient.setEx(cacheKey, ttl, JSON.stringify(candles))
-          .then(() => console.log(`✅ Cache salvo: ${cacheKey} (TTL: ${ttl}s)`))
-          .catch(err => console.error(`❌ Erro salvando cache: ${err.message}`));
-      }
-
-      return candles;
-    } finally {
-      inFlightRequests.delete(cacheKey);
-    }
-  })();
-
-  inFlightRequests.set(cacheKey, fetchPromise);
-  return fetchPromise;
+inFlightRequests.set(cacheKey, fetchPromise);
+return fetchPromise;
 }
 
 const analyzeLimiter = rateLimit({
@@ -307,57 +291,46 @@ return derivConnectionPromise;
 }
 
 async function getCurrentPrice(client, symbol) {
-  return new Promise((resolve) => {
-    if (!client.ws || client.ws.readyState !== client.ws.OPEN) {
-      console.log(`⚠️ WebSocket não conectado para tick de ${symbol}`);
-      return resolve(null);
-    }
+return new Promise((resolve) => {
+const reqId = Date.now();
 
-    if (typeof client.addListener !== 'function' || typeof client.removeListener !== 'function') {
-      console.log(`⚠️ DerivClient não suporta addListener/removeListener`);
-      return resolve(null);
-    }
+const handler = (response) => {
+if (response.error) {
+console.log(`⚠️ Erro no tick: ${response.error.message}`);
+clearTimeout(timeout);
+if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
+resolve(null);
+} else if (response.tick && response.tick.symbol === symbol) {
+clearTimeout(timeout);
+if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
+resolve(response.tick.quote);
+}
+};
 
-    const reqId = Date.now() + Math.random().toString(36).substr(2, 5);
-    let settled = false;
-    let timeout = null;
+const timeout = setTimeout(() => {
+console.log(`⏱️ Timeout ao obter tick para ${symbol}`);
+if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
+resolve(null);
+}, 800);
 
-    const cleanup = () => {
-      if (timeout) clearTimeout(timeout);
-      try {
-        client.removeListener(reqId, handler);
-      } catch (e) {}
-    };
+if (typeof client.addListener !== 'function') {
+console.log(`⚠️ DerivClient não suporta addListener`);
+clearTimeout(timeout);
+resolve(null);
+return;
+}
 
-    const handler = (response) => {
-      if (settled) return;
-      if (response.error) {
-        settled = true;
-        cleanup();
-        resolve(null);
-      } else if (response.tick && response.tick.symbol === symbol) {
-        settled = true;
-        cleanup();
-        resolve(response.tick.quote);
-      }
-    };
+client.addListener(reqId, handler);
 
-    timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-        resolve(null);
-      }
-    }, 800);
-
-    try {
-      client.addListener(reqId, handler);
-      client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
-    } catch (err) {
-      cleanup();
-      resolve(null);
-    }
-  });
+if (client.ws && client.ws.readyState === client.ws.OPEN) {
+client.ws.send(JSON.stringify({ tick: symbol, req_id: reqId }));
+} else {
+console.log(`⚠️ WebSocket não conectado para tick de ${symbol}`);
+clearTimeout(timeout);
+if (typeof client.removeListener === 'function') client.removeListener(reqId, handler);
+resolve(null);
+}
+});
 }
 
 app.get('/health', (req, res) => {
@@ -446,29 +419,33 @@ userId: finalUserId
 });
 });
 
+// ═══════════════════════════════════════════════════════
+// NOVA ROTA: REINICIAR SERVIÇO RENDER
+// ═══════════════════════════════════════════════════════
 app.post('/api/admin/restart-render', adminLimiter, async (req, res) => {
   try {
     const { adminKey } = req.body;
-
+    
+    // Validar chave de administrador
     if (!adminKey || adminKey !== ADMIN_SECRET) {
-      return res.status(403).json({
-        success: false,
-        error: 'Chave de administrador inválida'
+      return res.status(403).json({ 
+        success: false, 
+        error: 'Chave de administrador inválida' 
       });
     }
-
+    
     const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
     const RENDER_API_KEY = process.env.RENDER_API_KEY;
-
+    
     if (!RENDER_SERVICE_ID || !RENDER_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: 'Configuração do Render não encontrada no servidor. Verifique as variáveis de ambiente.'
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Configuração do Render não encontrada no servidor. Verifique as variáveis de ambiente.' 
       });
     }
-
+    
     console.log(`🔄 Reiniciando serviço Render: ${RENDER_SERVICE_ID}`);
-
+    
     const response = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/restart`, {
       method: 'POST',
       headers: {
@@ -476,29 +453,33 @@ app.post('/api/admin/restart-render', adminLimiter, async (req, res) => {
         'Authorization': `Bearer ${RENDER_API_KEY}`
       }
     });
-
+    
     if (response.ok) {
       console.log(`✅ Serviço Render reiniciado com sucesso`);
-      res.json({
-        success: true,
-        message: 'Serviço Render reiniciado com sucesso! O servidor estará disponível em alguns segundos.'
+      res.json({ 
+        success: true, 
+        message: 'Serviço Render reiniciado com sucesso! O servidor estará disponível em alguns segundos.' 
       });
     } else {
       const errorText = await response.text();
       console.error(`❌ Erro Render API (${response.status}):`, errorText);
-      res.status(response.status).json({
-        success: false,
-        error: `Erro ${response.status} da API Render: ${errorText}`
+      res.status(response.status).json({ 
+        success: false, 
+        error: `Erro ${response.status} da API Render: ${errorText}` 
       });
     }
   } catch (error) {
     console.error('❌ Erro ao reiniciar Render:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
     });
   }
 });
+
+// ═══════════════════════════════════════════════════════
+// ROTA EXISTENTE: CONNECTION STATUS
+// ═══════════════════════════════════════════════════════
 
 app.get('/api/connection-status', authenticateToken, (req, res) => {
 if (!derivClient) {
@@ -509,20 +490,23 @@ res.json(derivClient.getConnectionStatus());
 
 const RSI_LIMITS_BY_ASSET = {
   'forex':           { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 30, descricao: 'Forex' },
-  'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20, descricao: 'Volatility Index' },
-  'boom_index':      { pullback: 30, extremo: 25, sobrecompra: 85, sobrevenda: 20, descricao: 'Boom Index' },
-  'crash_index':     { pullback: 35, extremo: 20, sobrecompra: 80, sobrevenda: 15, descricao: 'Crash Index' },
-  'jump_index':      { pullback: 35, extremo: 28, sobrecompra: 82, sobrevenda: 18, descricao: 'Jump Index' },
-  'step_index':      { pullback: 38, extremo: 32, sobrecompra: 72, sobrevenda: 28, descricao: 'Step Index' },
+  'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20, descricao: 'Volatility' },
   'commodity':       { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Commodity' },
   'criptomoeda':     { pullback: 30, extremo: 25, sobrecompra: 80, sobrevenda: 20, descricao: 'Criptomoeda' },
-  'indice_normal':   { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Índice Normal' }
+  'indice_normal':   { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25, descricao: 'Índice Normal' },
+  'boom_index':      { pullback: 35, extremo: 30, sobrecompra: 85, sobrevenda: 20, descricao: 'Boom Index' },
+  'crash_index':     { pullback: 20, extremo: 15, sobrecompra: 80, sobrevenda: 15, descricao: 'Crash Index' },
+  'jump_index':      { pullback: 22, extremo: 18, sobrecompra: 82, sobrevenda: 18, descricao: 'Jump Index' },
+  'step_index':      { pullback: 32, extremo: 28, sobrecompra: 72, sobrevenda: 28, descricao: 'Step Index' }
 };
 
+// ========== FUNÇÃO CORRIGIDA: GERAR ALERTA DE PULLBACK ==========
+// Detecta pullback independente do primarySignal (funciona mesmo com HOLD)
 function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
   const limite = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
   let alertaPullback = null;
 
+  // 1. DETECÇÃO PARA SOBREVENDA (RSI BAIXO) - independente do sinal
   if (rsi < limite.pullback) {
     if (rsi < limite.extremo) {
       const excesso = limite.pullback - rsi;
@@ -550,6 +534,7 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
       };
     }
   }
+  // 2. DETECÇÃO PARA SOBRECOMPRA (RSI ALTO) - independente do sinal
   else if (rsi > limite.sobrecompra) {
     if (rsi > limite.sobrecompra + 5) {
       const excesso = rsi - limite.sobrecompra;
@@ -577,6 +562,7 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
       };
     }
   }
+  // 3. DETECÇÃO PREVENTIVA (aproximando das zonas críticas)
   else {
     if (rsi < limite.pullback + 12 && rsi >= limite.pullback) {
       alertaPullback = {
@@ -612,99 +598,429 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
 }
 
 function calcularTimingM1(m1Analysis, primarySignal) {
-  if (!m1Analysis) return { permitido: false, motivo: 'M1 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
+  if (!m1Analysis) {
+    return {
+      permitido: false,
+      motivo: 'M1 não disponível',
+      rsi: null,
+      sinal: null,
+      adx: null,
+      alerta_pullback: null
+    };
+  }
+
   const adx = m1Analysis.adx || 0;
   const rsi = m1Analysis.rsi || 50;
   const temTendencia = adx >= 22;
+
   const tipoAtivo = m1Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M1');
 
-  if (primarySignal === 'HOLD') return { permitido: false, motivo: 'Sinal principal HOLD', rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
+  if (primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'Sinal principal HOLD - aguardar definição',
+      rsi: rsi,
+      sinal: m1Analysis.sinal,
+      adx: adx,
+      alerta_pullback: alertaPullback
+    };
+  }
+
   if (primarySignal === 'CALL') {
-    if (m1Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) return { permitido: true, motivo: `M1 confirmando CALL (ADX ${adx.toFixed(0)})`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m1Analysis.sinal === 'CALL' && rsi < 75) return { permitido: true, motivo: `M1 confirmando CALL (tendência fraca)`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m1Analysis.sinal === 'PUT' && rsi < 38) return { permitido: true, motivo: `M1 oversold - possível reversão para CALL`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (temTendencia && m1Analysis.sinal === 'CALL') return { permitido: true, motivo: `M1 em tendência de CALL`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    return { permitido: false, motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${rsi.toFixed(0)})`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
+    if (m1Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando CALL com tendência (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m1Analysis.sinal === 'CALL' && rsi < 75) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m1Analysis.sinal === 'PUT' && rsi < 38) {
+      return {
+        permitido: true,
+        motivo: `M1 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (temTendencia && m1Analysis.sinal === 'CALL') {
+      return {
+        permitido: true,
+        motivo: `M1 em tendência de CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
   }
-  if (primarySignal === 'PUT') {
-    if (m1Analysis.sinal === 'PUT' && rsi > 25 && temTendencia) return { permitido: true, motivo: `M1 confirmando PUT (ADX ${adx.toFixed(0)})`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m1Analysis.sinal === 'PUT' && rsi > 25) return { permitido: true, motivo: `M1 confirmando PUT (tendência fraca)`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m1Analysis.sinal === 'CALL' && rsi > 62) return { permitido: true, motivo: `M1 overbought - possível reversão para PUT`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (temTendencia && m1Analysis.sinal === 'PUT') return { permitido: true, motivo: `M1 em tendência de PUT`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    return { permitido: false, motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${rsi.toFixed(0)})`, rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
+  else if (primarySignal === 'PUT') {
+    if (m1Analysis.sinal === 'PUT' && rsi > 25 && temTendencia) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando PUT com tendência (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m1Analysis.sinal === 'PUT' && rsi > 25) {
+      return {
+        permitido: true,
+        motivo: `M1 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m1Analysis.sinal === 'CALL' && rsi > 62) {
+      return {
+        permitido: true,
+        motivo: `M1 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (temTendencia && m1Analysis.sinal === 'PUT') {
+      return {
+        permitido: true,
+        motivo: `M1 em tendência de PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M1 não confirma (${m1Analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m1Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
   }
-  return { permitido: false, motivo: 'Sinal principal neutro', rsi, sinal: m1Analysis.sinal, adx, alerta_pullback: alertaPullback };
+
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi, sinal: m1Analysis.sinal, adx,
+    alerta_pullback: alertaPullback
+  };
 }
 
 function calcularTimingM5(m5Analysis, primarySignal) {
-  if (!m5Analysis) return { permitido: false, motivo: 'M5 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
+  if (!m5Analysis) {
+    return {
+      permitido: false,
+      motivo: 'M5 não disponível',
+      rsi: null,
+      sinal: null,
+      adx: null,
+      alerta_pullback: null
+    };
+  }
+
   const adx = m5Analysis.adx || 0;
   const rsi = m5Analysis.rsi || 50;
   const temTendencia = adx >= 22;
+
   const tipoAtivo = m5Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M5');
 
-  if (primarySignal === 'HOLD') return { permitido: false, motivo: 'Sinal principal HOLD', rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
+  if (primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'Sinal principal HOLD - aguardar definição',
+      rsi: rsi,
+      sinal: m5Analysis.sinal,
+      adx: adx,
+      alerta_pullback: alertaPullback
+    };
+  }
+
   if (primarySignal === 'CALL') {
-    if (m5Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) return { permitido: true, motivo: `M5 confirmando CALL (ADX ${adx.toFixed(0)})`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m5Analysis.sinal === 'CALL' && rsi < 75) return { permitido: true, motivo: `M5 confirmando CALL (tendência fraca)`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m5Analysis.sinal === 'PUT' && rsi < 38) return { permitido: true, motivo: `M5 oversold - possível reversão para CALL`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (temTendencia && m5Analysis.sinal === 'CALL') return { permitido: true, motivo: `M5 em tendência de CALL`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    return { permitido: false, motivo: `M5 não confirma (${m5Analysis.sinal}, RSI ${rsi.toFixed(0)})`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
+    if (m5Analysis.sinal === 'CALL' && rsi < 75 && temTendencia) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando CALL com tendência (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m5Analysis.sinal === 'CALL' && rsi < 75) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m5Analysis.sinal === 'PUT' && rsi < 38) {
+      return {
+        permitido: true,
+        motivo: `M5 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (temTendencia && m5Analysis.sinal === 'CALL') {
+      return {
+        permitido: true,
+        motivo: `M5 em tendência de CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M5 não confirma (${m5Analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
   }
-  if (primarySignal === 'PUT') {
-    if (m5Analysis.sinal === 'PUT' && rsi > 25 && temTendencia) return { permitido: true, motivo: `M5 confirmando PUT (ADX ${adx.toFixed(0)})`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m5Analysis.sinal === 'PUT' && rsi > 25) return { permitido: true, motivo: `M5 confirmando PUT (tendência fraca)`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m5Analysis.sinal === 'CALL' && rsi > 62) return { permitido: true, motivo: `M5 overbought - possível reversão para PUT`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (temTendencia && m5Analysis.sinal === 'PUT') return { permitido: true, motivo: `M5 em tendência de PUT`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    return { permitido: false, motivo: `M5 não confirma (${m5Analysis.sinal}, RSI ${rsi.toFixed(0)})`, rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
+  else if (primarySignal === 'PUT') {
+    if (m5Analysis.sinal === 'PUT' && rsi > 25 && temTendencia) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando PUT com tendência (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m5Analysis.sinal === 'PUT' && rsi > 25) {
+      return {
+        permitido: true,
+        motivo: `M5 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m5Analysis.sinal === 'CALL' && rsi > 62) {
+      return {
+        permitido: true,
+        motivo: `M5 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (temTendencia && m5Analysis.sinal === 'PUT') {
+      return {
+        permitido: true,
+        motivo: `M5 em tendência de PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M5 não confirma (${m5Analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m5Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
   }
-  return { permitido: false, motivo: 'Sinal principal neutro', rsi, sinal: m5Analysis.sinal, adx, alerta_pullback: alertaPullback };
+
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi, sinal: m5Analysis.sinal, adx,
+    alerta_pullback: alertaPullback
+  };
 }
 
 function calcularTimingM15(m15Analysis, primarySignal) {
-  if (!m15Analysis) return { permitido: false, motivo: 'M15 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
+  if (!m15Analysis) {
+    return {
+      permitido: false,
+      motivo: 'M15 não disponível',
+      rsi: null,
+      sinal: null,
+      adx: null,
+      alerta_pullback: null
+    };
+  }
+
   const adx = m15Analysis.adx || 0;
   const rsi = m15Analysis.rsi || 50;
   const temTendencia = adx >= 22;
+
   const tipoAtivo = m15Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'M15');
 
-  if (primarySignal === 'HOLD') return { permitido: false, motivo: 'Sinal principal HOLD', rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
+  if (primarySignal === 'HOLD') {
+    return {
+      permitido: false,
+      motivo: 'Sinal principal HOLD - aguardar definição',
+      rsi: rsi,
+      sinal: m15Analysis.sinal,
+      adx: adx,
+      alerta_pullback: alertaPullback
+    };
+  }
+
   if (primarySignal === 'CALL') {
-    if (m15Analysis.sinal === 'CALL' && rsi < 72 && temTendencia) return { permitido: true, motivo: `M15 confirmando CALL (ADX ${adx.toFixed(0)})`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m15Analysis.sinal === 'CALL' && rsi < 72) return { permitido: true, motivo: `M15 confirmando CALL (tendência fraca)`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m15Analysis.sinal === 'PUT' && rsi < 36) return { permitido: true, motivo: `M15 oversold - possível reversão para CALL`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (temTendencia && m15Analysis.sinal === 'CALL') return { permitido: true, motivo: `M15 em tendência de CALL`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    return { permitido: false, motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${rsi.toFixed(0)})`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
+    if (m15Analysis.sinal === 'CALL' && rsi < 72 && temTendencia) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando CALL com tendência (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m15Analysis.sinal === 'CALL' && rsi < 72) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando CALL (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m15Analysis.sinal === 'PUT' && rsi < 36) {
+      return {
+        permitido: true,
+        motivo: `M15 oversold - possível reversão para CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (temTendencia && m15Analysis.sinal === 'CALL') {
+      return {
+        permitido: true,
+        motivo: `M15 em tendência de CALL (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
   }
-  if (primarySignal === 'PUT') {
-    if (m15Analysis.sinal === 'PUT' && rsi > 28 && temTendencia) return { permitido: true, motivo: `M15 confirmando PUT (ADX ${adx.toFixed(0)})`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m15Analysis.sinal === 'PUT' && rsi > 28) return { permitido: true, motivo: `M15 confirmando PUT (tendência fraca)`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (m15Analysis.sinal === 'CALL' && rsi > 65) return { permitido: true, motivo: `M15 overbought - possível reversão para PUT`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    if (temTendencia && m15Analysis.sinal === 'PUT') return { permitido: true, motivo: `M15 em tendência de PUT`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
-    return { permitido: false, motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${rsi.toFixed(0)})`, rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
+  else if (primarySignal === 'PUT') {
+    if (m15Analysis.sinal === 'PUT' && rsi > 28 && temTendencia) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando PUT com tendência (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m15Analysis.sinal === 'PUT' && rsi > 28) {
+      return {
+        permitido: true,
+        motivo: `M15 confirmando PUT (tendência fraca/moderada ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (m15Analysis.sinal === 'CALL' && rsi > 65) {
+      return {
+        permitido: true,
+        motivo: `M15 overbought - possível reversão para PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else if (temTendencia && m15Analysis.sinal === 'PUT') {
+      return {
+        permitido: true,
+        motivo: `M15 em tendência de PUT (ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
+    else {
+      return {
+        permitido: false,
+        motivo: `M15 não confirma (${m15Analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`,
+        rsi, sinal: m15Analysis.sinal, adx,
+        alerta_pullback: alertaPullback
+      };
+    }
   }
-  return { permitido: false, motivo: 'Sinal principal neutro', rsi, sinal: m15Analysis.sinal, adx, alerta_pullback: alertaPullback };
+
+  return {
+    permitido: false,
+    motivo: 'Sinal principal neutro',
+    rsi, sinal: m15Analysis.sinal, adx,
+    alerta_pullback: alertaPullback
+  };
 }
 
+// ========== FUNÇÕES ADICIONADAS: TIMING H1 E H4 (APENAS ALERTAS) ==========
 function calcularTimingH1(h1Analysis, primarySignal) {
-  if (!h1Analysis) return { permitido: false, motivo: 'H1 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
+  if (!h1Analysis) {
+    return {
+      permitido: false,
+      motivo: 'H1 não disponível',
+      rsi: null,
+      sinal: null,
+      adx: null,
+      alerta_pullback: null
+    };
+  }
+
   const adx = h1Analysis.adx || 0;
   const rsi = h1Analysis.rsi || 50;
+
   const tipoAtivo = h1Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'H1');
-  return { permitido: false, motivo: 'H1 é timeframe de tendência', rsi, sinal: h1Analysis.sinal, adx, alerta_pullback: alertaPullback };
+
+  return {
+    permitido: false,
+    motivo: 'H1 é timeframe de tendência',
+    rsi: rsi,
+    sinal: h1Analysis.sinal,
+    adx: adx,
+    alerta_pullback: alertaPullback
+  };
 }
 
 function calcularTimingH4(h4Analysis, primarySignal) {
-  if (!h4Analysis) return { permitido: false, motivo: 'H4 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
+  if (!h4Analysis) {
+    return {
+      permitido: false,
+      motivo: 'H4 não disponível',
+      rsi: null,
+      sinal: null,
+      adx: null,
+      alerta_pullback: null
+    };
+  }
+
   const adx = h4Analysis.adx || 0;
   const rsi = h4Analysis.rsi || 50;
+
   const tipoAtivo = h4Analysis.tipo_ativo || 'indice_normal';
   const alertaPullback = gerarAlertaPullback(rsi, primarySignal, tipoAtivo, 'H4');
-  return { permitido: false, motivo: 'H4 é timeframe de tendência principal', rsi, sinal: h4Analysis.sinal, adx, alerta_pullback: alertaPullback };
+
+  return {
+    permitido: false,
+    motivo: 'H4 é timeframe de tendência principal',
+    rsi: rsi,
+    sinal: h4Analysis.sinal,
+    adx: adx,
+    alerta_pullback: alertaPullback
+  };
 }
 
 function getPriceSource(mtfManager) {
@@ -718,280 +1034,484 @@ return 'unknown';
 
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
 const startTime = Date.now();
-let mtfManager = null;
-let candlesMap = {};
-let historicalCandles = null;
-let analysisMap = {};
 
 try {
 const { symbol, mode } = req.body;
-if (!symbol) return res.status(400).json({ error: 'Símbolo é obrigatório' });
-if (!mode || !TRADING_MODES[mode]) return res.status(400).json({ error: 'Modo de trading inválido', availableModes: Object.keys(TRADING_MODES) });
+
+if (!symbol) {
+return res.status(400).json({ error: 'Símbolo é obrigatório' });
+}
+
+if (!mode || !TRADING_MODES[mode]) {
+return res.status(400).json({
+error: 'Modo de trading inválido. Use: SNIPER, CAÇADOR ou PESCADOR',
+availableModes: Object.keys(TRADING_MODES)
+});
+}
 
 console.log(`\n🎯 Modo selecionado: ${mode} - ${TRADING_MODES[mode].description}`);
 console.log(`📊 Timeframes a analisar: ${TRADING_MODES[mode].timeframes.join(', ')}`);
 
 const client = await getDerivClient();
-let timeframesToAnalyze = TRADING_MODES[mode].timeframes.map(tfKey => {
-  const tf = { ...ALL_TIMEFRAMES_CONFIG[tfKey] };
-  // Reduz candleCount para criptomoedas (API lenta)
-  if (symbol.startsWith('cry')) {
-    tf.candleCount = Math.min(tf.candleCount, 80);
-  }
-  return tf;
-});
 
-mtfManager = new MultiTimeframeManager(symbol);
+const timeframesToAnalyze_keys = TRADING_MODES[mode].timeframes;
 
+const mtfManager = new MultiTimeframeManager(symbol);
+
+// Detectar tipo de ativo — 9 tipos
 const tipoAtivo = (() => {
-  if (symbol.startsWith('R_')) return 'volatility_index';
-  if (symbol.startsWith('1HZ')) return 'volatility_index';
-  if (symbol.startsWith('BOOM')) return 'boom_index';
-  if (symbol.startsWith('CRASH')) return 'crash_index';
-  if (symbol.startsWith('JD')) return 'jump_index';
-  if (symbol.startsWith('stpRNG')) return 'step_index';
-  if (symbol === 'frxXAUUSD' || symbol === 'frxXAGUSD') return 'commodity';
-  if (symbol.startsWith('cry')) return 'criptomoeda';
-  if (symbol.startsWith('frx')) return 'forex';
+  if (symbol.startsWith('R_') || symbol.startsWith('1HZ')) return 'volatility_index';
+  if (/BOOM/i.test(symbol))                                  return 'boom_index';
+  if (/CRASH/i.test(symbol))                                 return 'crash_index';
+  if (symbol.startsWith('JD'))                               return 'jump_index';
+  if (/stpRNG/i.test(symbol))                                return 'step_index';
+  if (symbol.includes('frxXAU') || symbol.includes('frxXAG')) return 'commodity';
+  if (/^cry/i.test(symbol))                                  return 'criptomoeda';
+  if (symbol.startsWith('frx'))                              return 'forex';
   return 'indice_normal';
 })();
 
-mtfManager.tipoAtivo = tipoAtivo;
-console.log(`🏷️ Tipo de ativo detectado: ${tipoAtivo} (${symbol})`);
+// Para criptomoedas reduzir candleCount para 80 (velocidade)
+const timeframesToAnalyze = timeframesToAnalyze_keys.map(tfKey => {
+  const tf = { ...ALL_TIMEFRAMES_CONFIG[tfKey] };
+  if (tipoAtivo === 'criptomoeda') tf.candleCount = 80;
+  return tf;
+});
 
 const sistemaBase = new SistemaAnaliseInteligente(symbol);
-if (sistemaBase.sistemaPesos && sistemaBase.sistemaPesos.setTipoAtivo) sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
+
+if (sistemaBase.sistemaPesos && sistemaBase.sistemaPesos.setTipoAtivo) {
+sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
+}
 
 const atrTimeframeKey = getATRTimeframeByMode(mode);
 console.log(`📊 Modo ${mode} - usando ${atrTimeframeKey} para cálculo de ATR/volatilidade`);
 
-const allTfKeysToFetch = Array.from(new Set([atrTimeframeKey, ...TRADING_MODES[mode].timeframes]));
+const allTfKeysToFetch = Array.from(
+new Set([atrTimeframeKey, ...TRADING_MODES[mode].timeframes])
+);
+
 console.log(`⚡ Buscando ${allTfKeysToFetch.length} timeframes em paralelo: ${allTfKeysToFetch.join(', ')}`);
 
-await Promise.all(allTfKeysToFetch.map(async (tfKey) => {
-  const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
-  if (!tf) return;
-  try {
-    const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
-    if (Array.isArray(candles) && candles.length > 0) {
-      candlesMap[tfKey] = candles;
-      console.log(`✅ ${tfKey}: ${candles.length} candles prontos`);
-    } else console.log(`⚠️ ${tfKey}: sem candles válidos`);
-  } catch (err) { console.error(`❌ Erro ao buscar ${tfKey}:`, err.message); }
-}));
+const candlesMap = {};
+await Promise.all(
+allTfKeysToFetch.map(async (tfKey) => {
+const tf = ALL_TIMEFRAMES_CONFIG[tfKey];
+if (!tf) return;
+try {
+const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
+if (Array.isArray(candles) && candles.length > 0) {
+candlesMap[tfKey] = candles;
+console.log(`✅ ${tfKey}: ${candles.length} candles prontos`);
+} else {
+console.log(`⚠️ ${tfKey}: sem candles válidos`);
+}
+} catch (err) {
+console.error(`❌ Erro ao buscar ${tfKey}:`, err.message);
+}
+})
+);
 
-historicalCandles = candlesMap[atrTimeframeKey] || null;
+let historicalCandles = candlesMap[atrTimeframeKey] || null;
 if (!historicalCandles) {
-  const fallbackMap = { 'M1': ['M5', 'M15'], 'M5': ['M1', 'M15'], 'M15': ['M5', 'H1'] };
-  for (const fbKey of (fallbackMap[atrTimeframeKey] || ['M5', 'M15'])) {
-    if (candlesMap[fbKey]) { historicalCandles = candlesMap[fbKey]; console.log(`🔄 Fallback ATR: usando ${fbKey}`); break; }
-  }
+const fallbackMap = {
+'M1': ['M5', 'M15'],
+'M5': ['M1', 'M15'],
+'M15': ['M5', 'H1']
+};
+for (const fbKey of (fallbackMap[atrTimeframeKey] || ['M5', 'M15'])) {
+if (candlesMap[fbKey]) {
+historicalCandles = candlesMap[fbKey];
+console.log(`🔄 Fallback ATR: usando ${fbKey}`);
+break;
+}
+}
 }
 
 console.log(`⚡ Analisando ${timeframesToAnalyze.length} timeframes em paralelo`);
-const tickPromise = getCurrentPrice(client, symbol);
 
-await Promise.all(timeframesToAnalyze.map(async (tf) => {
-  try {
-    const candles = candlesMap[tf.key];
-    if (!candles) { console.log(`⚠️ ${tf.key}: candles não disponíveis`); return; }
-    if (candles.length < tf.minRequired) { console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`); return; }
-    const analysis = await sistemaBase.analisar(candles, tf.key);
-    if (analysis && !analysis.erro) { mtfManager.addAnalysis(tf.key, analysis); console.log(`✅ ${tf.key} analisado com sucesso`); }
-  } catch (err) { console.error(`❌ Erro ao analisar ${tf.key}:`, err.message); }
-}));
+await Promise.all(
+timeframesToAnalyze.map(async (tf) => {
+try {
+const candles = candlesMap[tf.key];
+if (!candles) {
+console.log(`⚠️ ${tf.key}: candles não disponíveis, pulando análise`);
+return;
+}
+if (candles.length < tf.minRequired) {
+console.log(`⚠️ ${tf.key}: apenas ${candles.length} candles, mínimo ${tf.minRequired}`);
+return;
+}
+const analysis = await sistemaBase.analisar(candles, tf.key);
+if (analysis && !analysis.erro) {
+mtfManager.addAnalysis(tf.key, analysis);
+console.log(`✅ ${tf.key} analisado com sucesso`);
+}
+} catch (err) {
+console.error(`❌ Erro ao analisar ${tf.key}:`, err.message);
+}
+})
+);
 
 const consolidated = mtfManager.consolidateSignals();
 const agreement = mtfManager.calculateAgreement();
 
 const timeframesSignals = [];
 for (const tfKey of TRADING_MODES[mode].timeframes) {
-  const analysis = mtfManager.timeframes[tfKey]?.analysis;
-  if (analysis && analysis.sinal && analysis.sinal !== 'HOLD') timeframesSignals.push(analysis.sinal);
+const analysis = mtfManager.timeframes[tfKey]?.analysis;
+if (analysis && analysis.sinal && analysis.sinal !== 'HOLD') {
+timeframesSignals.push(analysis.sinal);
 }
+}
+
 const callCountDiv = timeframesSignals.filter(s => s === 'CALL').length;
 const putCountDiv = timeframesSignals.filter(s => s === 'PUT').length;
+
 if (callCountDiv > 0 && putCountDiv > 0) {
-  console.log(`⚠️ Divergência de timeframes detectada: ${callCountDiv} CALL vs ${putCountDiv} PUT - forçando HOLD`);
-  consolidated.simpleMajority.signal = "HOLD";
-  consolidated.signal = "HOLD";
-  consolidated.confidence = Math.min(consolidated.confidence, 0.3);
+console.log(`⚠️ Divergência de timeframes detectada: ${callCountDiv} CALL vs ${putCountDiv} PUT - forçando HOLD`);
+consolidated.simpleMajority.signal = "HOLD";
+consolidated.signal = "HOLD";
+consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
 
 let hasMacdDivergence = false;
 for (const tfKey of TRADING_MODES[mode].timeframes) {
-  const analysis = mtfManager.timeframes[tfKey]?.analysis;
-  if (analysis && analysis.divergencia_macd && analysis.divergencia_macd.divergencia) {
-    hasMacdDivergence = true;
-    console.log(`⚠️ Divergência MACD detectada em ${tfKey} - forçando HOLD (${analysis.divergencia_macd.tipo})`);
-    break;
-  }
+const analysis = mtfManager.timeframes[tfKey]?.analysis;
+if (analysis && analysis.divergencia_macd && analysis.divergencia_macd.divergencia) {
+hasMacdDivergence = true;
+console.log(`⚠️ Divergência MACD detectada em ${tfKey} - forçando HOLD (${analysis.divergencia_macd.tipo})`);
+break;
+}
 }
 if (hasMacdDivergence) {
-  consolidated.simpleMajority.signal = "HOLD";
-  consolidated.signal = "HOLD";
-  consolidated.confidence = Math.min(consolidated.confidence, 0.3);
+consolidated.simpleMajority.signal = "HOLD";
+consolidated.signal = "HOLD";
+consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
 
-// Definir preço base IMEDIATAMENTE (usa M1, que é instantâneo)
 let currentPrice = 0;
 let priceSource = 'unknown';
 
-if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
-    currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
-    priceSource = 'M1';
-    console.log(`💰 Preço base via M1 (instantâneo): ${currentPrice}`);
-} else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) {
-    currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual;
-    priceSource = 'M5';
-    console.log(`💰 Preço base via M5 (instantâneo): ${currentPrice}`);
-} else {
-    const firstTf = timeframesToAnalyze[0]?.key || 'M5';
-    currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
-    priceSource = firstTf;
-    console.log(`💰 Preço base via fallback (${firstTf}): ${currentPrice}`);
-}
-
-// Tenta obter o tick, mas não espera mais que 200ms
-const tickTimeout = new Promise((resolve) => setTimeout(() => resolve(null), 200));
-const tickResult = await Promise.race([tickPromise, tickTimeout]);
-
+const tickResult = await getCurrentPrice(client, symbol);
 if (tickResult) {
-    currentPrice = tickResult;
-    priceSource = 'tick';
-    console.log(`💰 Preço ATUALIZADO via tick: ${currentPrice}`);
+currentPrice = tickResult;
+priceSource = 'tick';
+console.log(`💰 Preço via tick: ${currentPrice}`);
+} else if (mtfManager.timeframes['M1']?.analysis?.preco_atual) {
+currentPrice = mtfManager.timeframes['M1'].analysis.preco_atual;
+priceSource = 'M1';
+console.log(`💰 Preço via M1: ${currentPrice}`);
+} else if (mtfManager.timeframes['M5']?.analysis?.preco_atual) {
+currentPrice = mtfManager.timeframes['M5'].analysis.preco_atual;
+priceSource = 'M5';
+console.log(`💰 Preço via M5: ${currentPrice}`);
 } else {
-    console.log(`💰 Preço final via ${priceSource} (tick não disponível em 200ms)`);
+const firstTf = timeframesToAnalyze[0]?.key || 'M5';
+currentPrice = mtfManager.timeframes[firstTf]?.analysis?.preco_atual || 0;
+priceSource = firstTf;
+console.log(`💰 Preço via fallback (${firstTf}): ${currentPrice}`);
 }
 
-// ========== PREENCHER analysisMap (CRÍTICO PARA LIQUIDEZ) ==========
-for (const tfKey of TRADING_MODES[mode].timeframes) {
-    const analysis = mtfManager.timeframes[tfKey]?.analysis;
-    if (analysis) {
-        analysisMap[tfKey] = {
-            adx: analysis.adx,
-            rsi: analysis.rsi,
-            sinal: analysis.sinal
-        };
-    }
+const suggestion = BotExecutionCore.generateEntrySuggestion(
+{ sinal: consolidated.signal, probabilidade: consolidated.confidence },
+currentPrice
+);
+
+let m1Timing = null, m5Timing = null, m15Timing = null;
+let h1Timing = null, h4Timing = null;
+const primarySignal = consolidated.simpleMajority.signal;
+
+if (TRADING_MODES[mode].timeframes.includes('M1')) {
+const m1Analysis = mtfManager.timeframes['M1']?.analysis;
+m1Timing = calcularTimingM1(m1Analysis, primarySignal);
 }
-// =================================================================
+if (TRADING_MODES[mode].timeframes.includes('M5')) {
+const m5Analysis = mtfManager.timeframes['M5']?.analysis;
+m5Timing = calcularTimingM5(m5Analysis, primarySignal);
+}
+if (TRADING_MODES[mode].timeframes.includes('M15')) {
+const m15Analysis = mtfManager.timeframes['M15']?.analysis;
+m15Timing = calcularTimingM15(m15Analysis, primarySignal);
+}
+if (TRADING_MODES[mode].timeframes.includes('H1')) {
+const h1Analysis = mtfManager.timeframes['H1']?.analysis;
+h1Timing = calcularTimingH1(h1Analysis, primarySignal);
+}
+if (TRADING_MODES[mode].timeframes.includes('H4')) {
+const h4Analysis = mtfManager.timeframes['H4']?.analysis;
+h4Timing = calcularTimingH4(h4Analysis, primarySignal);
+}
 
-const atrCandles = candlesMap[atrTimeframeKey];
-const atrValue = atrCandles ? calculateATR(atrCandles) : null;
+let timingEspecial = null;
+if (mtfManager.tipoAtivo !== 'DEFAULT') {
+const m1Analysis = mtfManager.timeframes['M1']?.analysis;
+if (m1Analysis) {
+timingEspecial = mtfManager.calcularTimingEspecial('M1', m1Analysis);
+}
+}
 
-const liquidityResult = detectLiquiditySweepRobusto({ mode, currentPrice, candlesMap, analysisMap, atrValue });
-console.log(`💧 Liquidez detectada: ${liquidityResult.sweepDetected ? `${liquidityResult.direction} (${liquidityResult.confidence.toFixed(0)}%)` : 'Nenhum sweep relevante'}`);
+// ═══════════════════════════════════════════════════════
+// DETECÇÃO DE LIQUIDEZ — Liquidity Hunter Robusto
+// ═══════════════════════════════════════════════════════
+let liquidityResult = { sweepDetected: false };
+try {
+  // Montar analysisMap para o liquidity hunter
+  const analysisMap = {};
+  for (const tfKey of TRADING_MODES[mode].timeframes) {
+    const a = mtfManager.timeframes[tfKey]?.analysis;
+    if (a) analysisMap[tfKey] = a;
+  }
 
-if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75) {
-  console.log(`⚠️ Sinal de liquidez forte (${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%) - substituindo sinal principal`);
+  const atrForLiquidity = historicalCandles
+    ? calcularATRLiquidity(historicalCandles, 14)
+    : null;
+
+  liquidityResult = detectLiquiditySweepRobusto({
+    mode,
+    currentPrice,
+    candlesMap,
+    analysisMap,
+    atrValue: atrForLiquidity
+  });
+
+  console.log(`💧 Liquidez: ${
+    liquidityResult.sweepDetected
+      ? `SWEEP ${liquidityResult.direction} conf=${liquidityResult.confidence}% | ${liquidityResult.details?.reasons}`
+      : 'Nenhum sweep detectado'
+  }`);
+} catch (err) {
+  console.error('❌ Erro na detecção de liquidez:', err.message);
+}
+
+// Trava de segurança: não deixa a liquidez substituir quando TFs estão brigando
+const hasTfDivergenceForLiquidity = callCountDiv > 0 && putCountDiv > 0;
+
+// Verificar se o timing do modo está OK antes de permitir que a liquidez assuma
+let timingOk = false;
+if (mode === 'SNIPER'   && m1Timing?.permitido)  timingOk = true;
+if (mode === 'CAÇADOR'  && m5Timing?.permitido)  timingOk = true;
+if (mode === 'PESCADOR' && m15Timing?.permitido) timingOk = true;
+
+if (!hasTfDivergenceForLiquidity && liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk) {
+  console.log(`⚠️ Sinal de liquidez forte com TIMING OK (${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%) - substituindo sinal principal`);
   consolidated.signal = liquidityResult.direction;
   consolidated.confidence = liquidityResult.confidence;
   consolidated.simpleMajority.signal = liquidityResult.direction;
+} else if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && !timingOk) {
+  console.log(`💧 Sinal de liquidez forte detectado, mas TIMING NÃO OK - mantendo sinal principal`);
+} else if (hasTfDivergenceForLiquidity && liquidityResult.sweepDetected) {
+  console.log(`🔒 Liquidez detectada mas TFs em divergência (${callCountDiv} CALL vs ${putCountDiv} PUT) - mantendo sinal original`);
+}
+// ═══════════════════════════════════════════════════════
+
+let analiseRefinada = null;
+let validacaoRisco = null;
+
+try {
+const modeMap = {
+'SNIPER': 'SNIPER',
+'CAÇADOR': 'CACADOR',
+'PESCADOR': 'PESCADOR'
+};
+const modoIngles = modeMap[mode] || 'CACADOR';
+console.log(`🔄 Mapeando modo: ${mode} → ${modoIngles}`);
+
+const dadosMercado = {
+ativo: symbol,
+precoAtual: currentPrice,
+volume: 0,
+precosHistoricos: historicalCandles || [],
+timeframes: {}
+};
+
+for (const tfKey of TRADING_MODES[mode].timeframes) {
+const analysis = mtfManager.timeframes[tfKey]?.analysis;
+if (analysis) {
+dadosMercado.timeframes[tfKey] = {
+adx: analysis.adx || 25,
+rsi: analysis.rsi || 50,
+tendencia: analysis.sinal || 'HOLD',
+volatilidade: analysis.volatilidade || 1.0,
+precoAtual: analysis.preco_atual || currentPrice,
+precos: []
+};
+}
 }
 
-const suggestion = BotExecutionCore.generateEntrySuggestion({ sinal: consolidated.signal, probabilidade: consolidated.confidence }, currentPrice);
+const botAnalise = new TraderBotAnalise({
+confiancaMinimaOperar: 60,
+confiancaAlta: 75,
+adxTendenciaForte: 25,
+adxSemTendencia: 20
+});
 
-let m1Timing = null, m5Timing = null, m15Timing = null, h1Timing = null, h4Timing = null;
-const primarySignal = consolidated.simpleMajority.signal;
+analiseRefinada = botAnalise.gerarAnalise(dadosMercado, modoIngles);
 
-if (TRADING_MODES[mode].timeframes.includes('M1')) m1Timing = calcularTimingM1(mtfManager.timeframes['M1']?.analysis, primarySignal);
-if (TRADING_MODES[mode].timeframes.includes('M5')) m5Timing = calcularTimingM5(mtfManager.timeframes['M5']?.analysis, primarySignal);
-if (TRADING_MODES[mode].timeframes.includes('M15')) m15Timing = calcularTimingM15(mtfManager.timeframes['M15']?.analysis, primarySignal);
-if (TRADING_MODES[mode].timeframes.includes('H1')) h1Timing = calcularTimingH1(mtfManager.timeframes['H1']?.analysis, primarySignal);
-if (TRADING_MODES[mode].timeframes.includes('H4')) h4Timing = calcularTimingH4(mtfManager.timeframes['H4']?.analysis, primarySignal);
+const saldoUsuario = req.user?.saldo || 1000;
+validacaoRisco = botAnalise.validarOperacao(analiseRefinada, saldoUsuario, 2);
 
-let timingEspecial = null;
-if (mtfManager.tipoAtivo !== 'DEFAULT' && mtfManager.timeframes['M1']?.analysis) timingEspecial = mtfManager.calcularTimingEspecial('M1', mtfManager.timeframes['M1'].analysis);
+console.log(`📊 Análise refinada: sinal=${analiseRefinada.sinal.direcao}, confiança=${analiseRefinada.sinal.confianca}%`);
 
-let analiseRefinada = null, validacaoRisco = null;
-try {
-  const modeMap = { 'SNIPER': 'SNIPER', 'CAÇADOR': 'CACADOR', 'PESCADOR': 'PESCADOR' };
-  const modoIngles = modeMap[mode] || 'CACADOR';
-  const dadosMercado = { ativo: symbol, precoAtual: currentPrice, volume: 0, precosHistoricos: historicalCandles || [], timeframes: {} };
-  for (const tfKey of TRADING_MODES[mode].timeframes) {
-    const analysis = mtfManager.timeframes[tfKey]?.analysis;
-    if (analysis) dadosMercado.timeframes[tfKey] = { adx: analysis.adx || 25, rsi: analysis.rsi || 50, tendencia: analysis.sinal || 'HOLD', volatilidade: analysis.volatilidade || 1.0, precoAtual: analysis.preco_atual || currentPrice, precos: [] };
-  }
-  const botAnalise = new TraderBotAnalise({ confiancaMinimaOperar: 60, confiancaAlta: 75, adxTendenciaForte: 25, adxSemTendencia: 20 });
-  analiseRefinada = botAnalise.gerarAnalise(dadosMercado, modoIngles);
-  validacaoRisco = botAnalise.validarOperacao(analiseRefinada, req.user?.saldo || 1000, 2);
-  console.log(`📊 Análise refinada: sinal=${analiseRefinada.sinal.direcao}, confiança=${analiseRefinada.sinal.confianca}%`);
-} catch (err) { console.error('❌ Erro na análise refinada:', err.message); analiseRefinada = { erro: err.message }; }
+} catch (err) {
+console.error('❌ Erro na análise refinada:', err.message);
+analiseRefinada = { erro: err.message };
+}
 
 const responseTimeframes = {};
 TRADING_MODES[mode].timeframes.forEach(tfKey => {
-  const tfData = mtfManager.timeframes[tfKey];
-  if (tfData?.analysis) responseTimeframes[tfKey] = { sinal: tfData.analysis.sinal, probabilidade: tfData.analysis.probabilidade, adx: tfData.analysis.adx, rsi: tfData.analysis.rsi, preco_atual: tfData.analysis.preco_atual, macd_phase: tfData.analysis.macd_phase, divergencia_macd: tfData.analysis.divergencia_macd };
+const tfData = mtfManager.timeframes[tfKey];
+if (tfData?.analysis) {
+responseTimeframes[tfKey] = {
+sinal: tfData.analysis.sinal,
+probabilidade: tfData.analysis.probabilidade,
+adx: tfData.analysis.adx,
+rsi: tfData.analysis.rsi,
+preco_atual: tfData.analysis.preco_atual,
+macd_phase: tfData.analysis.macd_phase,
+divergencia_macd: tfData.analysis.divergencia_macd,
+};
+}
 });
 
 console.log('🔍 [SERVER] allAnalyses FINAL antes da resposta:');
-for (const [key, analysis] of Object.entries(mtfManager.allAnalyses)) console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+for (const [key, analysis] of Object.entries(mtfManager.allAnalyses)) {
+console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+}
 
 const responseTime = Date.now() - startTime;
-const response = {
-  success: true, mode, modeDescription: TRADING_MODES[mode].description,
-  consolidated: {
-    signal: consolidated.signal, confidence: consolidated.confidence, agreement: agreement.agreement, simpleMajority: consolidated.simpleMajority,
-    timeframesAnalyzed: agreement.totalTimeframes, sinal_premium: consolidated.sinal_premium || null, price: currentPrice, priceSource,
-    ...(m1Timing && { m1_timing: m1Timing }), ...(m5Timing && { m5_timing: m5Timing }), ...(m15Timing && { m15_timing: m15Timing }),
-    ...(h1Timing && { h1_timing: h1Timing }), ...(h4Timing && { h4_timing: h4Timing }), tipo_ativo: consolidated.tipo_ativo,
-    config_ativo: consolidated.config_ativo, ciclo_completo: consolidated.ciclo_completo, ponto_franco: consolidated.ponto_franco,
-    alinhamento_pescador: consolidated.alinhamento_pescador, timing_especial: timingEspecial
-  },
-  agreement: { agreement: agreement.agreement, primarySignal: agreement.primarySignal, callCount: agreement.callCount, putCount: agreement.putCount, totalTimeframes: agreement.totalTimeframes },
-  suggestion: { action: suggestion.action, reason: suggestion.reason, entry: suggestion.entry, stopLoss: suggestion.stopLoss, takeProfit: suggestion.takeProfit },
-  timeframes: responseTimeframes, refined_analysis: analiseRefinada, risk_validation: validacaoRisco, liquidity: liquidityResult,
-  metadata: { responseTimeMs: responseTime, timestamp: new Date().toISOString() }
-};
 
-// Limpeza
-if (mtfManager) { mtfManager.timeframes = {}; mtfManager.allAnalyses = {}; }
-candlesMap = null;
-historicalCandles = null;
-analysisMap = null;
+const response = {
+success: true,
+mode: mode,
+modeDescription: TRADING_MODES[mode].description,
+consolidated: {
+signal: consolidated.signal,
+confidence: consolidated.confidence,
+agreement: agreement.agreement,
+simpleMajority: consolidated.simpleMajority,
+timeframesAnalyzed: agreement.totalTimeframes,
+sinal_premium: consolidated.sinal_premium || null,
+price: currentPrice,
+priceSource: priceSource,
+...(m1Timing && { m1_timing: m1Timing }),
+...(m5Timing && { m5_timing: m5Timing }),
+...(m15Timing && { m15_timing: m15Timing }),
+...(h1Timing && { h1_timing: h1Timing }),
+...(h4Timing && { h4_timing: h4Timing }),
+tipo_ativo: consolidated.tipo_ativo,
+config_ativo: consolidated.config_ativo,
+ciclo_completo: consolidated.ciclo_completo,
+ponto_franco: consolidated.ponto_franco,
+alinhamento_pescador: consolidated.alinhamento_pescador,
+timing_especial: timingEspecial
+},
+agreement: {
+agreement: agreement.agreement,
+primarySignal: agreement.primarySignal,
+callCount: agreement.callCount,
+putCount: agreement.putCount,
+totalTimeframes: agreement.totalTimeframes
+},
+suggestion: {
+action: suggestion.action,
+reason: suggestion.reason,
+entry: suggestion.entry,
+stopLoss: suggestion.stopLoss,
+takeProfit: suggestion.takeProfit
+},
+timeframes: responseTimeframes,
+refined_analysis: analiseRefinada,
+risk_validation: validacaoRisco,
+liquidity: liquidityResult.sweepDetected ? {
+  sweepDetected: liquidityResult.sweepDetected,
+  direction: liquidityResult.direction,
+  confidence: liquidityResult.confidence,
+  liquidityZone: liquidityResult.liquidityZone || null,
+  details: liquidityResult.details || null,
+  timingOk: timingOk,
+  overrodeSignal: (!hasTfDivergenceForLiquidity && liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk)
+} : { sweepDetected: false },
+metadata: {
+responseTimeMs: responseTime,
+timestamp: new Date().toISOString()
+}
+};
 
 console.log(`✅ Análise concluída em ${responseTime}ms para modo ${mode} - ${agreement.totalTimeframes} TFs analisados | Tipo ativo: ${consolidated.tipo_ativo}`);
 res.json(response);
 
 } catch (error) {
 console.error('❌ Erro na análise:', error);
-res.status(500).json({ error: error.message, stack: process.env.NODE_ENV === 'development' ? error.stack : undefined });
+res.status(500).json({
+error: error.message,
+stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+});
 }
 });
 
-app.use((req, res) => res.status(404).json({ error: 'Rota não encontrada' }));
-app.use((err, req, res, next) => { console.error('❌ Erro global:', err); res.status(500).json({ error: 'Erro interno do servidor', message: process.env.NODE_ENV === 'development' ? err.message : undefined }); });
+app.use((req, res) => {
+res.status(404).json({ error: 'Rota não encontrada' });
+});
+
+app.use((err, req, res, next) => {
+console.error('❌ Erro global:', err);
+res.status(500).json({
+error: 'Erro interno do servidor',
+message: process.env.NODE_ENV === 'development' ? err.message : undefined
+});
+});
 
 const PORT = process.env.PORT || 3000;
+
 const server = app.listen(PORT, '0.0.0.0', async () => {
 console.log(`\n🚀 Servidor rodando na porta ${PORT}`);
 console.log(`🎯 Modos de trading disponíveis: ${Object.keys(TRADING_MODES).join(', ')}`);
 console.log(`⚙️ Modo: ${process.env.NODE_ENV || 'development'}`);
-console.log(`📊 Configuração de candles: M1/M5/M15=150 | M30=120 | H1=100 | H4=80 | H24=60`);
-console.log(`🤖 TraderBotAnalise integrado`);
-console.log(`💧 Caça à liquidez robusta ativada (com TTL mínimo)`);
-console.log(`🧠 [MEMÓRIA] Inicie com: node --max-old-space-size=512 server.js`);
+console.log(`📊 Configuração de candles: M1/M5/M15→150 | M30→120 | H1→100 | H4→80 | H24→60 (cripto→80)`);
+console.log(`🤖 TraderBotAnalise integrado com análise refinada de confiança`);
+console.log(`📈 ATR por modo: SNIPER→M1, CAÇADOR→M5, PESCADOR→M15`);
+console.log(`⚡ Busca e análise de timeframes em paralelo (Promise.all)`);
+console.log(`🔔 Alerta de pullback ativo em M1, M5, M15, H1 e H4 (PREVENTIVO/IMINENTE/EXTREMO)`);
+console.log(`💧 Liquidity Hunter Robusto integrado (./analyzers/liquidity-hunter-robusto)`);
+
 try {
 console.log('🔄 Iniciando conexão persistente com a Deriv...');
 await getDerivClient();
 console.log('✅ Conexão persistente estabelecida e mantida');
-} catch (err) { console.error('❌ Falha ao estabelecer conexão persistente:', err); }
+} catch (err) {
+console.error('❌ Falha ao estabelecer conexão persistente:', err);
+}
 });
 
-server.keepAliveTimeout = 120000;
-server.headersTimeout = 120000;
+// 🔧 CORREÇÃO PARA ERRO 502 BAD GATEWAY NO RENDER
+// Aumenta os timeouts de keep-alive para evitar que o Node.js feche conexões
+// antes do proxy do Render, causando 502 intermitentes.
+server.keepAliveTimeout = 120000; // 120 segundos (recomendado pelo Render)
+server.headersTimeout = 120000;    // 120 segundos
 
 process.on('SIGTERM', () => {
 console.log('\n🛑 Recebido SIGTERM, encerrando conexões...');
+
 server.close(() => {
 console.log('✅ Servidor HTTP encerrado');
-if (derivClient) derivClient.disconnect();
-if (redisClient) redisClient.quit();
+
+if (derivClient) {
+derivClient.disconnect();
+console.log('✅ Cliente Deriv desconectado');
+}
+
+if (redisClient) {
+redisClient.quit();
+console.log('✅ Cliente Redis desconectado');
+}
+
 process.exit(0);
 });
 });
 
-process.on('SIGINT', () => { console.log('\n🛑 Recebido SIGINT, encerrando...'); process.emit('SIGTERM'); });
+process.on('SIGINT', () => {
+console.log('\n🛑 Recebido SIGINT, encerrando...');
+process.emit('SIGTERM');
+});
 
 module.exports = app;
