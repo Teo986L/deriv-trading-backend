@@ -152,7 +152,7 @@ function getPsychologicalLevels(currentPrice, precision, rangePercent = 0.02) {
 }
 
 /**
- * Verifica se o sweep foi forte (wick > 1.5 * corpo)
+ * Verifica se o sweep foi forte (wick > 1.0 * corpo)
  */
 function isStrongRejection(candle, direction) {
     const body = Math.abs(candle.close - candle.open);
@@ -315,7 +315,7 @@ function detectLiquiditySweepRobusto({
         }
         if (!isSweep) continue;
 
-        // Confirmar follow-through com movimento mínimo
+        // Confirmar follow-through com movimento mínimo (agora desativado, sempre true)
         if (!confirmFollowThrough(candles, direction, threshold)) {
             continue; // mercado não confirmou com força
         }
@@ -435,5 +435,4 @@ module.exports = {
     detectLiquiditySweepRobusto,
     calculateATR,
     MODE_CONFIG
-};
 };
