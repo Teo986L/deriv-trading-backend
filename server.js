@@ -103,7 +103,6 @@ return map[mode] || 'M5';
 }
 
 // ── candleCount calibrado por velocidade + precisão ──────────────────────────
-// SNIPER usa menos candles (mais rápido); PESCADOR usa mais (TFs maiores)
 const ALL_TIMEFRAMES_CONFIG = {
 'M1':  { key: 'M1',  seconds: 60,    candleCount: 100, minRequired: 50 },
 'M5':  { key: 'M5',  seconds: 300,   candleCount: 120, minRequired: 50 },
@@ -438,31 +437,67 @@ const client = await getDerivClient();
 const tipoAtivo = detectTipoAtivo(symbol);
 console.log(`🏷️  ${tipoAtivo}`);
 
-// ── 2. Montar lista de TFs e aplicar candleCount para cripto ─────────────────
+// ── 2. Montar lista de TFs e aplicar candleCount específico por tipo de ativo ───
 const modeTimeframes = TRADING_MODES[mode].timeframes;
 const atrTfKey = getATRTimeframeByMode(mode);
 const allTfKeys = Array.from(new Set([atrTfKey, ...modeTimeframes]));
 
+// 🔧 ALTERAÇÃO 1: Redução de candles para índices sintéticos e cripto
+const CANDLE_COUNT_BY_ASSET = {
+  'volatility_index': { M1: 60, M5: 105, M15: 105, M30: 60, H1: 85, H4: 40, H24: 30 },
+  'boom_index':       { M1: 60, M5: 105, M15: 105, M30: 60, H1: 85, H4: 40, H24: 30 },
+  'crash_index':      { M1: 60, M5: 105, M15: 105, M30: 60, H1: 85, H4: 40, H24: 30 },
+  'jump_index':       { M1: 60, M5: 105, M15: 105, M30: 60, H1: 85, H4: 40, H24: 30 },
+  'step_index':       { M1: 60, M5: 105, M15: 105, M30: 60, H1: 85, H4: 40, H24: 30 },
+  'criptomoeda':      { M1: 60, M5:  60, M15:  60, M30: 60, H1: 50, H4: 40, H24: 30 },
+};
+
 const timeframesToAnalyze = modeTimeframes.map(tfKey => {
-const tf = { ...ALL_TIMEFRAMES_CONFIG[tfKey] };
-if (tipoAtivo === 'criptomoeda') tf.candleCount = 60; // cripto: ainda mais rápido
-return tf;
+  const tf = { ...ALL_TIMEFRAMES_CONFIG[tfKey] };
+  const overrides = CANDLE_COUNT_BY_ASSET[tipoAtivo];
+  if (overrides && overrides[tfKey]) {
+    tf.candleCount = overrides[tfKey];
+    console.log(`📉 ${tfKey} candleCount ajustado para ${tipoAtivo}: ${tf.candleCount}`);
+  } else if (tipoAtivo === 'criptomoeda') {
+    tf.candleCount = 60;
+  }
+  return tf;
 });
 
 // ── 3. Fetch candles + tick em PARALELO ──────────────────────────────────────
-// O tick começa a resolver enquanto os candles ainda estão a chegar.
-const tickPromise = getCurrentPrice(client, symbol); // 🔑 sem await aqui
+const tickPromise = getCurrentPrice(client, symbol);
 
 const candlesMap = {};
+// 🔧 ALTERAÇÃO 2: Timeout de 4 segundos por fetch, com fallback para cache stale
 await Promise.all(
-allTfKeys.map(async (tfKey) => {
-const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
-if (!tf) return;
-try {
-const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
-if (Array.isArray(candles) && candles.length > 0) candlesMap[tfKey] = candles;
-} catch (err) { console.error(`❌ ${tfKey}:`, err.message); }
-})
+  allTfKeys.map(async (tfKey) => {
+    const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
+    if (!tf) return;
+    try {
+      const startFetch = Date.now();
+      const candles = await Promise.race([
+        getCandlesWithCache(client, symbol, tf, mode, false),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Timeout ${tf.key} (4s)`)), 4000)
+        )
+      ]);
+      console.log(`⏱️ ${tf.key} fetch: ${Date.now() - startFetch}ms`);
+      if (Array.isArray(candles) && candles.length > 0) candlesMap[tf.key] = candles;
+    } catch (err) {
+      console.error(`❌ ${tf.key}:`, err.message);
+      // Tenta usar cache expirado como fallback
+      if (redisClient && redisClient.isReady && err.message.includes('Timeout')) {
+        try {
+          const cacheKey = `candles:${symbol}:${tf.key}`;
+          const stale = await redisClient.get(cacheKey);
+          if (stale) {
+            console.warn(`⚠️ Usando cache stale para ${tf.key}`);
+            candlesMap[tf.key] = JSON.parse(stale);
+          }
+        } catch (cacheErr) {}
+      }
+    }
+  })
 );
 
 let historicalCandles = candlesMap[atrTfKey] || null;
@@ -528,7 +563,7 @@ consolidated.signal = 'HOLD';
 consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
 
-// ── 7. Preço: tick já deve ter resolvido (ou cai no fallback do candle) ───────
+// ── 7. Preço: tick já deve ter resolvido ───────────────────────────────────────
 const tickResult = await tickPromise;
 let currentPrice = 0, priceSource = 'unknown';
 if (tickResult) {
@@ -549,7 +584,6 @@ const suggestion = BotExecutionCore.generateEntrySuggestion(
 // ── 8. Timing + analiseRefinada em PARALELO ──────────────────────────────────
 const primarySignal = consolidated.simpleMajority.signal;
 
-// analiseRefinada roda em paralelo com timing e liquidez
 const analiseRefinadaPromise = (async () => {
 try {
 const modeMap = { 'SNIPER': 'SNIPER', 'CAÇADOR': 'CACADOR', 'PESCADOR': 'PESCADOR' };
@@ -575,7 +609,6 @@ return { analiseRefinada: { erro: err.message }, validacaoRisco: null };
 }
 })();
 
-// Timing (síncrono, rápido)
 let m1Timing = null, m5Timing = null, m15Timing = null, h1Timing = null, h4Timing = null;
 if (modeTimeframes.includes('M1'))  m1Timing  = calcularTimingM1(mtfManager.timeframes['M1']?.analysis,  primarySignal);
 if (modeTimeframes.includes('M5'))  m5Timing  = calcularTimingM5(mtfManager.timeframes['M5']?.analysis,  primarySignal);
@@ -605,7 +638,6 @@ atrValue: historicalCandles ? calcularATRLiquidity(historicalCandles, 14) : null
 console.log(`💧 ${liquidityResult.sweepDetected ? `SWEEP ${liquidityResult.direction} ${liquidityResult.confidence}%` : 'sem sweep'}`);
 } catch (err) { console.error('❌ liquidez:', err.message); }
 
-// Trava: não substitui se TFs em divergência
 const hasTfDivergenceForLiquidity = callCountDiv > 0 && putCountDiv > 0;
 let timingOk = false;
 if (mode === 'SNIPER'   && m1Timing?.permitido)  timingOk = true;
@@ -623,7 +655,7 @@ console.log(`💧 Liquidez forte mas TIMING NÃO OK - mantendo sinal`);
 console.log(`🔒 Liquidez detectada mas TFs divergem - mantendo sinal`);
 }
 
-// ── 10. Aguardar analiseRefinada (já estava a correr em paralelo) ─────────────
+// ── 10. Aguardar analiseRefinada ─────────────────────────────────────────────
 const { analiseRefinada, validacaoRisco } = await analiseRefinadaPromise;
 
 // ── 11. Montar resposta ───────────────────────────────────────────────────────
@@ -703,9 +735,9 @@ const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', async () => {
 console.log(`\n🚀 Porta ${PORT}`);
 console.log(`🎯 Modos: ${Object.keys(TRADING_MODES).join(', ')}`);
-console.log(`📊 Candles: M1→100 | M5/M15→120 | M30→100 | H1→80 | H4→60 | H24→40 (cripto→60)`);
-console.log(`⚡ Tick timeout: 350ms | Candles + Tick em paralelo | analiseRefinada em paralelo`);
-console.log(`🏷️  Deteção de ativo: 9 tipos (volatility/boom/crash/jump/step/commodity/cripto/forex/normal)`);
+console.log(`📊 Candles: M1→100 | M5/M15→120 | M30→100 | H1→80 | H4→60 | H24→40 (ajustado por tipo de ativo)`);
+console.log(`⚡ Tick timeout: 350ms | Candles com timeout 4s + fallback cache stale`);
+console.log(`🏷️  Deteção de ativo: 9 tipos`);
 console.log(`💧 Liquidity Hunter Robusto ativo`);
 try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
 catch (err) { console.error('❌ Conexão Deriv:', err); }
