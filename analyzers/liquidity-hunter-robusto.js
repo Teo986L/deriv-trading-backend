@@ -143,7 +143,7 @@ function getPsychologicalLevels(currentPrice, precision, rangePercent = 0.02) {
     const levels = [];
     const range = currentPrice * rangePercent;
     // Step dinâmico: garante no máximo ~40 níveis
-    const step = Math.max(precision, range / 20);
+    const step = Math.max(precision, range / 30);
     let start = Math.ceil((currentPrice - range) / step) * step;
     const end = currentPrice + range;
     for (let p = start; p <= end; p += step) {
