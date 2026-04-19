@@ -442,7 +442,7 @@ const modeTimeframes = TRADING_MODES[mode].timeframes;
 const atrTfKey = getATRTimeframeByMode(mode);
 const allTfKeys = Array.from(new Set([atrTfKey, ...modeTimeframes]));
 
-// 🔧 ALTERAÇÃO 1: Redução de candles para índices sintéticos e cripto
+// 🔧 Redução de candles para índices sintéticos e cripto
 const CANDLE_COUNT_BY_ASSET = {
   'volatility_index': { M1: 60, M5: 105, M15: 105, M30: 60, H1: 85, H4: 40, H24: 30 },
   'boom_index':       { M1: 60, M5: 105, M15: 105, M30: 60, H1: 85, H4: 40, H24: 30 },
@@ -468,7 +468,7 @@ const timeframesToAnalyze = modeTimeframes.map(tfKey => {
 const tickPromise = getCurrentPrice(client, symbol);
 
 const candlesMap = {};
-// 🔧 ALTERAÇÃO 2: Timeout de 4 segundos por fetch, com fallback para cache stale
+// Timeout de 4 segundos por fetch, com fallback para cache stale
 await Promise.all(
   allTfKeys.map(async (tfKey) => {
     const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
@@ -516,19 +516,24 @@ const sistemaBase = new SistemaAnaliseInteligente(symbol);
 if (sistemaBase.sistemaPesos?.setTipoAtivo) sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
 
 // ── 5. Analisar todos os TFs em PARALELO ─────────────────────────────────────
+// 🔧 LOG TEMPORÁRIO: medir tempo de análise por TF e total
+const analyzeStart = Date.now();
 await Promise.all(
-timeframesToAnalyze.map(async (tf) => {
-try {
-const candles = candlesMap[tf.key];
-if (!candles || candles.length < tf.minRequired) return;
-const analysis = await sistemaBase.analisar(candles, tf.key);
-if (analysis && !analysis.erro) {
-mtfManager.addAnalysis(tf.key, analysis);
-console.log(`✅ ${tf.key} OK`);
-}
-} catch (err) { console.error(`❌ análise ${tf.key}:`, err.message); }
-})
+  timeframesToAnalyze.map(async (tf) => {
+    try {
+      const candles = candlesMap[tf.key];
+      if (!candles || candles.length < tf.minRequired) return;
+      const t0 = Date.now();
+      const analysis = await sistemaBase.analisar(candles, tf.key);
+      console.log(`⏱️ analisar ${tf.key}: ${Date.now() - t0}ms`);
+      if (analysis && !analysis.erro) {
+        mtfManager.addAnalysis(tf.key, analysis);
+        console.log(`✅ ${tf.key} OK`);
+      }
+    } catch (err) { console.error(`❌ análise ${tf.key}:`, err.message); }
+  })
 );
+console.log(`⏱️ TOTAL análise TFs: ${Date.now() - analyzeStart}ms`);
 
 // ── 6. Consolidar sinais ─────────────────────────────────────────────────────
 const consolidated = mtfManager.consolidateSignals();
@@ -656,7 +661,10 @@ console.log(`🔒 Liquidez detectada mas TFs divergem - mantendo sinal`);
 }
 
 // ── 10. Aguardar analiseRefinada ─────────────────────────────────────────────
+// 🔧 LOG TEMPORÁRIO: medir tempo da análise refinada
+const refStart = Date.now();
 const { analiseRefinada, validacaoRisco } = await analiseRefinadaPromise;
+console.log(`⏱️ analiseRefinada: ${Date.now() - refStart}ms`);
 
 // ── 11. Montar resposta ───────────────────────────────────────────────────────
 const responseTimeframes = {};
@@ -735,7 +743,7 @@ const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, '0.0.0.0', async () => {
 console.log(`\n🚀 Porta ${PORT}`);
 console.log(`🎯 Modos: ${Object.keys(TRADING_MODES).join(', ')}`);
-console.log(`📊 Candles: M1→100 | M5/M15→120 | M30→100 | H1→80 | H4→60 | H24→40 (ajustado por tipo de ativo)`);
+console.log(`📊 Candles: Ajustados por tipo de ativo (com logs de diagnóstico ativos)`);
 console.log(`⚡ Tick timeout: 350ms | Candles com timeout 4s + fallback cache stale`);
 console.log(`🏷️  Deteção de ativo: 9 tipos`);
 console.log(`💧 Liquidity Hunter Robusto ativo`);
