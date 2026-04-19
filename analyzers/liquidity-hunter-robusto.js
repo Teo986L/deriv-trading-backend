@@ -138,18 +138,16 @@ function detectSupportResistanceLevels(candles, lookback, tolerance = 0.002, min
     return result;
 }
 
-/**
- * Gera níveis psicológicos (preços redondos)
- */
+// ✅ NOVO — máximo 40 níveis independente do preço
 function getPsychologicalLevels(currentPrice, precision, rangePercent = 0.02) {
     const levels = [];
     const range = currentPrice * rangePercent;
-    const step = precision;
-    let start = currentPrice - range;
-    start = Math.floor(start / step) * step;
-    let end = currentPrice + range;
+    // Step dinâmico: garante no máximo ~40 níveis
+    const step = Math.max(precision, range / 20);
+    let start = Math.ceil((currentPrice - range) / step) * step;
+    const end = currentPrice + range;
     for (let p = start; p <= end; p += step) {
-        if (Math.abs(p - currentPrice) > 0.0001) levels.push(p);
+        if (Math.abs(p - currentPrice) > step * 0.01) levels.push(p);
     }
     return levels;
 }
