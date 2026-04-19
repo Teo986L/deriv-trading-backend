@@ -40,7 +40,8 @@ const MODE_CONFIG = {
         primaryTimeframe: 'H1',
         secondaryTimeframe: 'H4',
         tertiaryTimeframe: 'H24',
-        lookbacks: [100, 200],
+        // 🔧 ALTERAÇÃO 3: Lookbacks compatíveis com H1 (que agora tem 85 candles)
+        lookbacks: [50, 80],   // antes era [100, 200]
         thresholdATRMultiplier: 1.0,
         thresholdPercent: 0.01,
         confirmCandles: 1,
@@ -203,8 +204,9 @@ function detectLiquiditySweepRobusto({
         }
     }
 
-    // 3. Níveis de suporte/resistência
-    const srLevels = detectSupportResistanceLevels(candles, 100, threshold * 0.5, config.minTouchCount);
+    // 3. Níveis de suporte/resistência (🔧 ALTERAÇÃO 4: lookback dinâmico)
+    const srLookback = Math.min(100, candles.length);
+    const srLevels = detectSupportResistanceLevels(candles, srLookback, threshold * 0.5, config.minTouchCount);
     for (const lvl of srLevels) {
         allLevels.push({ price: lvl.price, type: 'SR', touches: lvl.touches, direction: 'both' });
     }
