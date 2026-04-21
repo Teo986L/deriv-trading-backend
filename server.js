@@ -170,12 +170,9 @@ return fetchPromise;
 }
 
 const analyzeLimiter = rateLimit({
-  windowMs: 60 * 1000,        // 1 minuto (janela mais curta)
-  max: 30,                    // 30 requisições por minuto por usuário
-  keyGenerator: (req) => {
-// Usa o userId do token JWT, se disponível, senão o IP
-return req.user?.userId || req.ip;
-},
+  windowMs: 60 * 1000,        // 1 minuto
+  max: 60,                    // 60 análises por minuto por usuário
+  keyGenerator: (req) => req.user?.userId || req.ip,
   message: { error: 'Limite de requisições por minuto excedido. Aguarde.' },
   standardHeaders: true,
   legacyHeaders: false,
