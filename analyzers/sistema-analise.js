@@ -439,18 +439,13 @@ class SistemaAnaliseInteligente {
     }
 
     async analisar(candles, timeframeKey = 'M5') {
+        // Verificação mínima de candles – sem descartar a vela aberta
         if (!candles || candles.length < 20) {
             return { erro: "Dados insuficientes (mínimo 20 candles)" };
         }
 
-        const tfSeconds = this.getTimeframeSeconds(timeframeKey);
-        if (candles.length > 0 && !this.isCandleClosed(candles[candles.length - 1], tfSeconds)) {
-            console.log(`⚠️ Último candle de ${timeframeKey} descartado por estar aberto`);
-            candles = candles.slice(0, -1);
-            if (candles.length < 20) {
-                return { erro: "Dados insuficientes após descartar candle aberto" };
-            }
-        }
+        // ⚡ O bloco que removia a última vela foi ELIMINADO
+        // Agora a análise utiliza TODAS as velas disponíveis, incluindo a vela atual (aberta)
 
         const fechamentos = candles.map(c => parseFloat(c.close));
         const precoAtual = fechamentos[fechamentos.length - 1];
