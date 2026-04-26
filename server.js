@@ -122,9 +122,11 @@ return now >= candle.epoch + timeframeSeconds - CANDLE_CLOSE_TOLERANCE;
 
 const inFlightRequests = new Map();
 
-async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false) {
+// ========== FUNÇÃO DE CACHE MODIFICADA ==========
+// Agora aceita um TTL opcional (ttlOverride) e NÃO ignora o cache enquanto a vela está aberta.
+async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false, ttlOverride = null) {
 const cacheKey = `candles:${symbol}:${tf.key}`;
-const ttl = getTTLAlignedToCandle(tf.seconds);
+const ttl = ttlOverride !== null ? ttlOverride : getTTLAlignedToCandle(tf.seconds);
 
 if (redisClient && redisClient.isReady && !forceFresh) {
 try {
@@ -133,6 +135,7 @@ if (cached) {
 const remainingTTL = await redisClient.ttl(cacheKey);
 console.log(`✅ Cache hit: ${cacheKey} (TTL: ${remainingTTL}s)`);
 
+// Se o TTL está quase a acabar, faz um pré-cache em background
 if (remainingTTL <= CANDLE_CLOSE_MARGIN) {
 setImmediate(async () => {
 try {
@@ -453,6 +456,20 @@ if (tipoAtivo === 'criptomoeda') tf.candleCount = 60; // cripto: ainda mais ráp
 return tf;
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// NOVO: Determinar o timeframe principal do modo e o TTL unificado
+// ═══════════════════════════════════════════════════════════════════
+let primaryTf;
+if (mode === 'SNIPER') primaryTf = 'M1';
+else if (mode === 'CAÇADOR') primaryTf = 'M5';
+else if (mode === 'PESCADOR') primaryTf = 'M15';
+else primaryTf = 'M5'; // fallback
+
+const primaryTfConfig = ALL_TIMEFRAMES_CONFIG[primaryTf];
+const cacheTTL = primaryTfConfig ? getTTLAlignedToCandle(primaryTfConfig.seconds) : 30;
+
+console.log(`⏱️  Cache TTL unificado: ${cacheTTL}s (alinhado com fecho do ${primaryTf})`);
+
 // ── 3. Fetch candles + tick em PARALELO ──────────────────────────────────────
 // O tick começa a resolver enquanto os candles ainda estão a chegar.
 const tickPromise = getCurrentPrice(client, symbol); // 🔑 sem await aqui
@@ -463,7 +480,8 @@ allTfKeys.map(async (tfKey) => {
 const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
 if (!tf) return;
 try {
-const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
+// Passar o cacheTTL para garantir que todos os TFs do modo partilham o mesmo TTL
+const candles = await getCandlesWithCache(client, symbol, tf, mode, false, cacheTTL);
 if (Array.isArray(candles) && candles.length > 0) candlesMap[tfKey] = candles;
 } catch (err) { console.error(`❌ ${tfKey}:`, err.message); }
 })
