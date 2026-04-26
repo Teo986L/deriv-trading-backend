@@ -41,6 +41,34 @@ optionsSuccessStatus: 200
 app.use(express.json());
 app.set('trust proxy', 1);
 
+// ========== CACHE EM MEMÓRIA (ANTI-RUÍDO, SEM DEPENDER DE REDIS) ==========
+const memoryCache = new Map(); // chave -> { data, expiresAt }
+
+function getFromMemoryCache(key) {
+    const entry = memoryCache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+        memoryCache.delete(key);
+        return null;
+    }
+    return entry.data;
+}
+
+function setToMemoryCache(key, data, ttlSeconds) {
+    memoryCache.set(key, {
+        data,
+        expiresAt: Date.now() + ttlSeconds * 1000
+    });
+}
+
+// Limpeza periódica (evita acumular chaves expiradas)
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of memoryCache) {
+        if (now > entry.expiresAt) memoryCache.delete(key);
+    }
+}, 60000); // a cada 60 segundos
+
 // ========== CONFIGURAÇÃO DO REDIS (OPCIONAL) ==========
 let redisClient = null;
 
@@ -88,7 +116,7 @@ console.error('❌ Falha ao conectar Redis:', err);
 redisClient = null;
 }
 } else {
-console.log('⚠️ Redis não configurado - cache desativado');
+console.log('⚠️ Redis não configurado - cache em memória ativo');
 }
 
 const TRADING_MODES = {
@@ -103,7 +131,6 @@ return map[mode] || 'M5';
 }
 
 // ── candleCount calibrado por velocidade + precisão ──────────────────────────
-// SNIPER usa menos candles (mais rápido); PESCADOR usa mais (TFs maiores)
 const ALL_TIMEFRAMES_CONFIG = {
 'M1':  { key: 'M1',  seconds: 60,    candleCount: 100, minRequired: 50 },
 'M5':  { key: 'M5',  seconds: 300,   candleCount: 120, minRequired: 50 },
@@ -122,20 +149,35 @@ return now >= candle.epoch + timeframeSeconds - CANDLE_CLOSE_TOLERANCE;
 
 const inFlightRequests = new Map();
 
-// ========== FUNÇÃO DE CACHE MODIFICADA ==========
-// Agora aceita um TTL opcional (ttlOverride) e NÃO ignora o cache enquanto a vela está aberta.
+// ========== FUNÇÃO DE CACHE UNIFICADA (MEMÓRIA + REDIS) ==========
 async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false, ttlOverride = null) {
 const cacheKey = `candles:${symbol}:${tf.key}`;
 const ttl = ttlOverride !== null ? ttlOverride : getTTLAlignedToCandle(tf.seconds);
 
+// 1. Tenta cache em memória (rápido e sempre disponível)
+if (!forceFresh) {
+const memCached = getFromMemoryCache(cacheKey);
+if (memCached) {
+const entry = memoryCache.get(cacheKey);
+const remaining = Math.ceil((entry.expiresAt - Date.now()) / 1000);
+console.log(`💾 Cache memória: ${cacheKey} (TTL: ${remaining}s)`);
+return memCached;
+}
+}
+
+// 2. Tenta Redis (se estiver pronto)
 if (redisClient && redisClient.isReady && !forceFresh) {
 try {
 const cached = await redisClient.get(cacheKey);
 if (cached) {
 const remainingTTL = await redisClient.ttl(cacheKey);
-console.log(`✅ Cache hit: ${cacheKey} (TTL: ${remainingTTL}s)`);
+console.log(`✅ Cache Redis: ${cacheKey} (TTL: ${remainingTTL}s)`);
 
-// Se o TTL está quase a acabar, faz um pré-cache em background
+// Guarda também em memória para próximos acessos
+const candles = JSON.parse(cached);
+setToMemoryCache(cacheKey, candles, remainingTTL > 0 ? remainingTTL : ttl);
+
+// Pré-cache em background se TTL estiver a acabar
 if (remainingTTL <= CANDLE_CLOSE_MARGIN) {
 setImmediate(async () => {
 try {
@@ -143,26 +185,34 @@ const freshCandles = await client.getCandles(symbol, tf.candleCount, tf.seconds)
 if (Array.isArray(freshCandles)) {
 const newTtl = getTTLAlignedToCandle(tf.seconds);
 await redisClient.setEx(cacheKey, newTtl, JSON.stringify(freshCandles));
+setToMemoryCache(cacheKey, freshCandles, newTtl);
 }
 } catch (err) { console.error(`❌ Erro pré-cache: ${err.message}`); }
 });
 }
-return JSON.parse(cached);
+return candles;
 }
 } catch (err) { console.error(`❌ Erro Redis ${cacheKey}:`, err.message); }
 }
 
+// 3. Evita requisições duplicadas em voo
 if (inFlightRequests.has(cacheKey)) return inFlightRequests.get(cacheKey);
 
+// 4. Fetch fresco da Deriv
 const fetchPromise = (async () => {
 try {
 console.log(`🔄 Buscando ${tf.key} (${tf.candleCount} candles)`);
 const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
 if (!Array.isArray(candles)) return candles;
 console.log(`📊 ${tf.key}: ${candles.length} candles`);
+
+// Guarda em memória
+setToMemoryCache(cacheKey, candles, ttl);
+
+// Guarda no Redis (se disponível)
 if (redisClient && redisClient.isReady) {
 redisClient.setEx(cacheKey, ttl, JSON.stringify(candles))
-.catch(err => console.error(`❌ Erro salvando cache: ${err.message}`));
+.catch(err => console.error(`❌ Erro salvando Redis: ${err.message}`));
 }
 return candles;
 } finally { inFlightRequests.delete(cacheKey); }
@@ -729,6 +779,7 @@ console.log(`📊 Candles: M1→100 | M5/M15→120 | M30→100 | H1→80 | H4→
 console.log(`⚡ Tick timeout: 350ms | Candles + Tick em paralelo | analiseRefinada em paralelo`);
 console.log(`🏷️  Deteção de ativo: 9 tipos (volatility/boom/crash/jump/step/commodity/cripto/forex/normal)`);
 console.log(`💧 Liquidity Hunter Robusto ativo`);
+console.log(`💾 Cache em memória anti-ruído ativo`);
 try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
 catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
