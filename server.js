@@ -134,8 +134,7 @@ return map[mode] || 'M5';
 const ALL_TIMEFRAMES_CONFIG = {
 'M1':  { key: 'M1',  seconds: 60,    candleCount: 100, minRequired: 50 },
 'M5':  { key: 'M5',  seconds: 300,   candleCount: 120, minRequired: 50 },
-'M15': { key: 'M15', seconds: 900,   candleCount: 120, minRequired: 50 },
-'M30': { key: 'M30', seconds: 1800,  candleCount: 100, minRequired: 50 },
+'M15': { key: 'M15', seconds: 900,   candleCount: 100, minRequired: 50 },
 'H1':  { key: 'H1',  seconds: 3600,  candleCount: 100,  minRequired: 30 },
 'H4':  { key: 'H4',  seconds: 14400, candleCount: 60,  minRequired: 20 },
 'H24': { key: 'H24', seconds: 86400, candleCount: 40,  minRequired: 15 }
