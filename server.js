@@ -631,25 +631,32 @@ if (hasWarning && consolidated.signal !== 'HOLD') {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// NOVO: Nota de tendência primária para o PESCADOR
+// NOVO: Nota de tendência primária (TODOS OS MODOS)
 // ═══════════════════════════════════════════════════════════════
 let primaryTrendNote = null;
-if (mode === 'PESCADOR' && consolidated.signal === 'HOLD') {
-    const h24Analysis = mtfManager.timeframes['H24']?.analysis;
-    const h4Analysis = mtfManager.timeframes['H4']?.analysis;
-    
-    // Prioridade ao H24, fallback para H4
-    const primaryTF = (h24Analysis && h24Analysis.adx > 20) ? h24Analysis : 
-                      (h4Analysis && h4Analysis.adx > 20) ? h4Analysis : null;
-    
-    if (primaryTF && primaryTF.sinal !== 'HOLD') {
-        const directionText = primaryTF.sinal === 'PUT' ? 'BAIXA' : 'ALTA';
-        const tfLabel = primaryTF === h24Analysis ? 'H24' : 'H4';
-        primaryTrendNote = `Tendência primária (${tfLabel}): ${directionText}. Aguarde pullback para ${primaryTF.sinal === 'PUT' ? 'venda' : 'compra'}.`;
+if (consolidated.signal === 'HOLD') {
+    const trendTFMap = { 'SNIPER': 'M15', 'CAÇADOR': 'H1', 'PESCADOR': 'H24' };
+    let tfKey = trendTFMap[mode];
+
+    // Para PESCADOR, fallback para H4 se H24 não tiver ADX > 20
+    if (mode === 'PESCADOR') {
+        const h24 = mtfManager.timeframes['H24']?.analysis;
+        if (!h24 || h24.adx <= 20 || h24.sinal === 'HOLD') {
+            const h4 = mtfManager.timeframes['H4']?.analysis;
+            if (h4 && h4.adx > 20 && h4.sinal !== 'HOLD') {
+                tfKey = 'H4';
+            }
+        }
+    }
+
+    const analysis = mtfManager.timeframes[tfKey]?.analysis;
+    if (analysis && analysis.adx > 20 && analysis.sinal !== 'HOLD') {
+        const directionText = analysis.sinal === 'PUT' ? 'BAIXA' : 'ALTA';
+        const actionText = analysis.sinal === 'PUT' ? 'venda' : 'compra';
+        primaryTrendNote = `Tendência primária (${tfKey}): ${directionText}. Aguarde pullback para ${actionText}.`;
         console.log(`🧭 ${primaryTrendNote}`);
     }
 }
-
 const suggestion = BotExecutionCore.generateEntrySuggestion(
 { sinal: consolidated.signal, probabilidade: consolidated.confidence }, currentPrice
 );
