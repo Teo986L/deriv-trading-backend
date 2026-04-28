@@ -613,6 +613,43 @@ if (p) { currentPrice = p; priceSource = tf; break; }
 console.log(`💰 fallback (${priceSource}): ${currentPrice}`);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// NOVO: Penalização por alertas de "Perdendo Força" nos TFs
+// ═══════════════════════════════════════════════════════════════
+let hasWarning = false;
+for (const tfKey of modeTimeframes) {
+    const phase = mtfManager.timeframes[tfKey]?.analysis?.macd_phase?.name;
+    if (phase && phase.includes('PERDENDO FORÇA')) {
+        hasWarning = true;
+        break;
+    }
+}
+if (hasWarning && consolidated.signal !== 'HOLD') {
+    const originalConfidence = consolidated.confidence;
+    consolidated.confidence = Math.max(0.10, consolidated.confidence - 0.15);
+    console.log(`⚠️ Confiança reduzida de ${(originalConfidence*100).toFixed(1)}% para ${(consolidated.confidence*100).toFixed(1)}% devido a alerta "Perdendo Força" nos TFs.`);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// NOVO: Nota de tendência primária para o PESCADOR
+// ═══════════════════════════════════════════════════════════════
+let primaryTrendNote = null;
+if (mode === 'PESCADOR' && consolidated.signal === 'HOLD') {
+    const h24Analysis = mtfManager.timeframes['H24']?.analysis;
+    const h4Analysis = mtfManager.timeframes['H4']?.analysis;
+    
+    // Prioridade ao H24, fallback para H4
+    const primaryTF = (h24Analysis && h24Analysis.adx > 20) ? h24Analysis : 
+                      (h4Analysis && h4Analysis.adx > 20) ? h4Analysis : null;
+    
+    if (primaryTF && primaryTF.sinal !== 'HOLD') {
+        const directionText = primaryTF.sinal === 'PUT' ? 'BAIXA' : 'ALTA';
+        const tfLabel = primaryTF === h24Analysis ? 'H24' : 'H4';
+        primaryTrendNote = `Tendência primária (${tfLabel}): ${directionText}. Aguarde pullback para ${primaryTF.sinal === 'PUT' ? 'venda' : 'compra'}.`;
+        console.log(`🧭 ${primaryTrendNote}`);
+    }
+}
+
 const suggestion = BotExecutionCore.generateEntrySuggestion(
 { sinal: consolidated.signal, probabilidade: consolidated.confidence }, currentPrice
 );
@@ -732,7 +769,9 @@ config_ativo: consolidated.config_ativo,
 ciclo_completo: consolidated.ciclo_completo,
 ponto_franco: consolidated.ponto_franco,
 alinhamento_pescador: consolidated.alinhamento_pescador,
-timing_especial: timingEspecial
+timing_especial: timingEspecial,
+// NOVO: Nota de tendência primária
+primaryTrendNote: primaryTrendNote || null
 },
 agreement: {
 agreement: agreement.agreement, primarySignal: agreement.primarySignal,
@@ -779,6 +818,8 @@ console.log(`⚡ Tick timeout: 350ms | Candles + Tick em paralelo | analiseRefin
 console.log(`🏷️  Deteção de ativo: 9 tipos (volatility/boom/crash/jump/step/commodity/cripto/forex/normal)`);
 console.log(`💧 Liquidity Hunter Robusto ativo`);
 console.log(`💾 Cache em memória anti-ruído ativo`);
+console.log(`⚠️ Penalização "Perdendo Força" (-15%) ativa`);
+console.log(`🧭 Nota de tendência primária (PESCADOR) ativa`);
 try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
 catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
