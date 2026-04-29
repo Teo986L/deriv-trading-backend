@@ -464,15 +464,35 @@ return { permitido: false, motivo: 'H4 é TF de tendência', rsi: a.rsi || 50, s
 
 // ── Detetor de tipo de ativo (9 tipos, todos os símbolos do frontend) ─────────
 function detectTipoAtivo(symbol) {
-if (symbol.startsWith('R_') || symbol.startsWith('1HZ')) return 'volatility_index';
-if (/^BOOM/i.test(symbol))   return 'boom_index';
-if (/^CRASH/i.test(symbol))  return 'crash_index';
-if (/^JD/i.test(symbol))     return 'jump_index';
-if (/^stpRNG/i.test(symbol)) return 'step_index';
-if (symbol.includes('XAU') || symbol.includes('XAG')) return 'commodity';
-if (/^cry/i.test(symbol))    return 'criptomoeda';
-if (/^frx/i.test(symbol))    return 'forex';
-return 'indice_normal';
+    // Cestas de moedas (ex: WLDAUD, WLDEUR...) → mesmo comportamento de forex
+    if (/^WLD/i.test(symbol)) return 'forex';
+
+    // Índices sintéticos Deriv
+    if (symbol.startsWith('R_') || symbol.startsWith('1HZ')) return 'volatility_index';
+    if (/^BOOM/i.test(symbol))   return 'boom_index';
+    if (/^CRASH/i.test(symbol))  return 'crash_index';
+    if (/^JD/i.test(symbol))     return 'jump_index';
+    if (/^stpRNG/i.test(symbol)) return 'step_index';
+
+    // Range Break (RB100, RB200) e Bear/Bull Market Index → volatilidade sintética
+    if (/^RB\d+$/i.test(symbol) || /^RDBEAR$/i.test(symbol) || /^RDBULL$/i.test(symbol)) {
+        return 'volatility_index';
+    }
+
+    // Metais (ouro, prata, paládio, platina)
+    if (/XAU|XAG|XPD|XPT/i.test(symbol)) return 'commodity';
+
+    // Criptomoedas
+    if (/^cry/i.test(symbol)) return 'criptomoeda';
+
+    // Forex (todos os pares, exceto os já pegos como commodities)
+    if (/^frx/i.test(symbol)) return 'forex';
+
+    // Índices OTC (ações mundiais) → índices normais
+    if (/^OTC_/i.test(symbol)) return 'indice_normal';
+
+    // Fallback seguro
+    return 'indice_normal';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
