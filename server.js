@@ -747,6 +747,32 @@ if (m1a && typeof mtfManager.calcularTimingEspecial === 'function')
 timingEspecial = mtfManager.calcularTimingEspecial('M1', m1a);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// NOVO: Penalização forte se o timing do TF primário falhar
+// Não bloqueia o sinal, mas reduz a confiança drasticamente
+// ═══════════════════════════════════════════════════════════════
+let timingRiskWarning = null;
+
+if (consolidated.signal !== 'HOLD') {
+    const modeTimingMap = {
+        'SNIPER': m1Timing,
+        'CAÇADOR': m5Timing,
+        'PESCADOR': m15Timing
+    };
+    const primaryTiming = modeTimingMap[mode];
+
+    if (primaryTiming && !primaryTiming.permitido) {
+        const previousConf = consolidated.confidence;
+        consolidated.confidence = Math.min(consolidated.confidence, 0.35);
+        timingRiskWarning = `⛔ ENTRADA DE RISCO — timing do ${primaryTf} não confirma`;
+
+        console.log(
+            `⛔ Timing primário (${primaryTf}) NÃO OK → confiança limitada a 35% ` +
+            `(${(previousConf * 100).toFixed(1)}% → ${(consolidated.confidence * 100).toFixed(1)}%)`
+        );
+    }
+}
+
 // ── 9. Deteção de Liquidez ────────────────────────────────────────────────────
 let liquidityResult = { sweepDetected: false };
 try {
@@ -821,7 +847,8 @@ ciclo_completo: consolidated.ciclo_completo,
 ponto_franco: consolidated.ponto_franco,
 alinhamento_pescador: consolidated.alinhamento_pescador,
 timing_especial: timingEspecial,
-primaryTrendNote: primaryTrendNote || null
+primaryTrendNote: primaryTrendNote || null,
+timingRiskWarning: timingRiskWarning || null   // ← NOVO CAMPO
 },
 agreement: {
 agreement: agreement.agreement, primarySignal: agreement.primarySignal,
@@ -871,6 +898,7 @@ console.log(`💾 Cache em memória anti-ruído ativo`);
 console.log(`⚠️ Penalização "Perdendo Força": -8% primário / -4% secundário (máx -8% se TFs unânimes)`);
 console.log(`🔧 FIX: liquidityResult.confidence normalizado para escala 0-1`);
 console.log(`🧭 Nota de tendência primária ativa`);
+console.log(`⛔ Penalização de Timing: limitada a 35% se o TF primário não confirma`);
 try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
 catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
