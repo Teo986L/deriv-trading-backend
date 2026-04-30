@@ -525,9 +525,9 @@ if (tipoAtivo === 'criptomoeda') tf.candleCount = 60; // cripto: ainda mais ráp
 return tf;
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// NOVO: Determinar o timeframe principal do modo e o TTL unificado
-// ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// Determinar o timeframe principal do modo e o TTL unificado
+// ═══════════════════════════════════════════════════════════════
 let primaryTf;
 if (mode === 'SNIPER') primaryTf = 'M1';
 else if (mode === 'CAÇADOR') primaryTf = 'M5';
@@ -540,8 +540,7 @@ const cacheTTL = primaryTfConfig ? getTTLAlignedToCandle(primaryTfConfig.seconds
 console.log(`⏱️  Cache TTL unificado: ${cacheTTL}s (alinhado com fecho do ${primaryTf})`);
 
 // ── 3. Fetch candles + tick em PARALELO ──────────────────────────────────────
-// O tick começa a resolver enquanto os candles ainda estão a chegar.
-const tickPromise = getCurrentPrice(client, symbol); // 🔑 sem await aqui
+const tickPromise = getCurrentPrice(client, symbol);
 
 const candlesMap = {};
 await Promise.all(
@@ -549,7 +548,6 @@ allTfKeys.map(async (tfKey) => {
 const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
 if (!tf) return;
 try {
-// Passar o cacheTTL para garantir que todos os TFs do modo partilham o mesmo TTL
 const candles = await getCandlesWithCache(client, symbol, tf, mode, false, cacheTTL);
 if (Array.isArray(candles) && candles.length > 0) candlesMap[tfKey] = candles;
 } catch (err) { console.error(`❌ ${tfKey}:`, err.message); }
@@ -634,24 +632,47 @@ console.log(`💰 fallback (${priceSource}): ${currentPrice}`);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// NOVO: Penalização por alertas de "Perdendo Força" nos TFs
+// FIX: Penalização por "Perdendo Força" — agora proporcional e
+// restrita ao TF primário do modo. Antes: -15% sempre.
+// Agora:  -8% se for o TF primário, -4% se for TF secundário.
+// Não reduz abaixo de 55% quando todos os TFs concordam.
 // ═══════════════════════════════════════════════════════════════
-let hasWarning = false;
+const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+const modePrimaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
+const allTfsAgree = callCountDiv === modeTimeframes.length || putCountDiv === modeTimeframes.length;
+
+let totalPenalty = 0;
+let warningTfs = [];
+
 for (const tfKey of modeTimeframes) {
     const phase = mtfManager.timeframes[tfKey]?.analysis?.macd_phase?.name;
     if (phase && phase.includes('PERDENDO FORÇA')) {
-        hasWarning = true;
-        break;
+        const isPrimary = tfKey === modePrimaryTf;
+        const penalty = isPrimary ? 0.08 : 0.04;
+        totalPenalty += penalty;
+        warningTfs.push(tfKey);
     }
 }
-if (hasWarning && consolidated.signal !== 'HOLD') {
+
+if (totalPenalty > 0 && consolidated.signal !== 'HOLD') {
     const originalConfidence = consolidated.confidence;
-    consolidated.confidence = Math.max(0.10, consolidated.confidence - 0.15);
-    console.log(`⚠️ Confiança reduzida de ${(originalConfidence*100).toFixed(1)}% para ${(consolidated.confidence*100).toFixed(1)}% devido a alerta "Perdendo Força" nos TFs.`);
+
+    // Se todos os TFs concordam, limita a penalização máxima a -8%
+    // para não derrubar abaixo do threshold de 55%
+    const maxPenalty = allTfsAgree ? 0.08 : 0.15;
+    const appliedPenalty = Math.min(totalPenalty, maxPenalty);
+
+    consolidated.confidence = Math.max(0.10, consolidated.confidence - appliedPenalty);
+    console.log(
+        `⚠️ Penalização "Perdendo Força" nos TFs [${warningTfs.join(', ')}]: ` +
+        `-${(appliedPenalty * 100).toFixed(0)}% ` +
+        `(${(originalConfidence * 100).toFixed(1)}% → ${(consolidated.confidence * 100).toFixed(1)}%) ` +
+        `| TFs unânimes: ${allTfsAgree}`
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
-// NOVO: Nota de tendência primária (TODOS OS MODOS)
+// Nota de tendência primária (TODOS OS MODOS)
 // ═══════════════════════════════════════════════════════════════
 let primaryTrendNote = null;
 if (consolidated.signal === 'HOLD') {
@@ -677,6 +698,7 @@ if (consolidated.signal === 'HOLD') {
         console.log(`🧭 ${primaryTrendNote}`);
     }
 }
+
 const suggestion = BotExecutionCore.generateEntrySuggestion(
 { sinal: consolidated.signal, probabilidade: consolidated.confidence }, currentPrice
 );
@@ -748,14 +770,16 @@ if (mode === 'CAÇADOR'  && m5Timing?.permitido)  timingOk = true;
 if (mode === 'PESCADOR' && m15Timing?.permitido) timingOk = true;
 
 if (!hasTfDivergenceForLiquidity && liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk) {
-console.log(`⚠️ Liquidez substitui sinal → ${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%`);
-consolidated.signal = liquidityResult.direction;
-consolidated.confidence = liquidityResult.confidence;
-consolidated.simpleMajority.signal = liquidityResult.direction;
+    console.log(`⚠️ Liquidez substitui sinal → ${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%`);
+    consolidated.signal = liquidityResult.direction;
+    // ✅ FIX: liquidityResult.confidence vem em escala 0-100 (inteiro percentual),
+    //    mas consolidated.confidence usa escala 0.0-1.0 — dividir por 100.
+    consolidated.confidence = liquidityResult.confidence / 100;
+    consolidated.simpleMajority.signal = liquidityResult.direction;
 } else if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && !timingOk) {
-console.log(`💧 Liquidez forte mas TIMING NÃO OK - mantendo sinal`);
+    console.log(`💧 Liquidez forte mas TIMING NÃO OK - mantendo sinal`);
 } else if (hasTfDivergenceForLiquidity && liquidityResult.sweepDetected) {
-console.log(`🔒 Liquidez detectada mas TFs divergem - mantendo sinal`);
+    console.log(`🔒 Liquidez detectada mas TFs divergem - mantendo sinal`);
 }
 
 // ── 10. Aguardar analiseRefinada (já estava a correr em paralelo) ─────────────
@@ -797,7 +821,6 @@ ciclo_completo: consolidated.ciclo_completo,
 ponto_franco: consolidated.ponto_franco,
 alinhamento_pescador: consolidated.alinhamento_pescador,
 timing_especial: timingEspecial,
-// NOVO: Nota de tendência primária
 primaryTrendNote: primaryTrendNote || null
 },
 agreement: {
@@ -845,8 +868,9 @@ console.log(`⚡ Tick timeout: 350ms | Candles + Tick em paralelo | analiseRefin
 console.log(`🏷️  Deteção de ativo: 9 tipos (volatility/boom/crash/jump/step/commodity/cripto/forex/normal)`);
 console.log(`💧 Liquidity Hunter Robusto ativo`);
 console.log(`💾 Cache em memória anti-ruído ativo`);
-console.log(`⚠️ Penalização "Perdendo Força" (-15%) ativa`);
-console.log(`🧭 Nota de tendência primária (PESCADOR) ativa`);
+console.log(`⚠️ Penalização "Perdendo Força": -8% primário / -4% secundário (máx -8% se TFs unânimes)`);
+console.log(`🔧 FIX: liquidityResult.confidence normalizado para escala 0-1`);
+console.log(`🧭 Nota de tendência primária ativa`);
 try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
 catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
