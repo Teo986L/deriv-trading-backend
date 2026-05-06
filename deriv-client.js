@@ -14,9 +14,14 @@ class DerivClient extends EventEmitter {
         this.pendingRequests = new Map();
         this.pingInterval = null;
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 10;
+
+        // ✅ FIX: sem limite máximo — reconecta para sempre com backoff
+        this.maxReconnectDelay = 60000; // máximo 60s entre tentativas
         this.reconnectDelay = 1000;
         this.connecting = false;
+
+        // ✅ FIX: Map de listeners para ticks (usado por getCurrentPrice no server.js)
+        this._tickListeners = new Map();
     }
 
     connect() {
@@ -45,7 +50,7 @@ class DerivClient extends EventEmitter {
                 clearTimeout(connectionTimeout);
                 this.connecting = false;
                 this.connected = true;
-                this.reconnectAttempts = 0;
+                this.reconnectAttempts = 0; // reset ao conectar com sucesso
                 console.log('✅ WebSocket conectado');
                 this.startPing();
                 this.authorize().then(() => {
@@ -66,13 +71,14 @@ class DerivClient extends EventEmitter {
             });
 
             this.ws.on('error', (err) => {
-                console.error('💥 WebSocket erro:', err);
+                console.error('💥 WebSocket erro:', err.message);
                 clearTimeout(connectionTimeout);
                 this.connecting = false;
                 this.connected = false;
                 this.authorized = false;
                 this.stopPing();
                 this.emit('error', err);
+                // Não rejeita aqui se já passou pelo 'open' — o 'close' vai tratar
                 reject(err);
             });
 
@@ -83,25 +89,44 @@ class DerivClient extends EventEmitter {
                 this.connected = false;
                 this.authorized = false;
                 this.stopPing();
+
+                // Rejeita todas as pendentes para não ficarem presas
+                this._rejectAllPending('WebSocket fechado inesperadamente');
+
                 this.emit('close', code, reason);
                 this._reconnect();
             });
         });
     }
 
+    // ✅ FIX: reconexão infinita com backoff exponencial até 60s (nunca desiste)
     _reconnect() {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error('🚫 Máximo de tentativas de reconexão atingido');
-            return;
-        }
-        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
+        // Backoff exponencial: 1s, 2s, 4s, 8s, 16s, 32s, 60s, 60s, 60s...
+        const delay = Math.min(
+            this.reconnectDelay * Math.pow(2, this.reconnectAttempts),
+            this.maxReconnectDelay
+        );
         this.reconnectAttempts++;
         console.log(`🔄 Tentando reconectar em ${delay}ms (tentativa ${this.reconnectAttempts})`);
+
         setTimeout(() => {
             this.connect().catch(err => {
                 console.error('❌ Falha na reconexão:', err.message);
+                // _reconnect() será chamado novamente pelo evento 'close'
             });
         }, delay);
+    }
+
+    // ✅ FIX: rejeita todos os pedidos pendentes quando o WS fecha
+    _rejectAllPending(reason) {
+        if (this.pendingRequests.size > 0) {
+            console.log(`⚠️ Rejeitando ${this.pendingRequests.size} pedidos pendentes: ${reason}`);
+            for (const [id, { reject, timeout }] of this.pendingRequests) {
+                clearTimeout(timeout);
+                reject(new Error(reason));
+            }
+            this.pendingRequests.clear();
+        }
     }
 
     _handleMessage(msg) {
@@ -117,6 +142,14 @@ class DerivClient extends EventEmitter {
         }
 
         if (msg.msg_type === 'pong') {
+            return;
+        }
+
+        // ✅ FIX: distribui ticks para os listeners do getCurrentPrice
+        if (msg.msg_type === 'tick' && msg.tick) {
+            for (const [, handler] of this._tickListeners) {
+                try { handler(msg); } catch (e) { /* ignora erros no handler */ }
+            }
             return;
         }
 
@@ -144,9 +177,9 @@ class DerivClient extends EventEmitter {
             const timeout = setTimeout(() => {
                 this.pendingRequests.delete(reqId);
                 reject(new Error('Timeout na autorização'));
-            }, 30000); // ⬅️ AUMENTADO PARA 30 SEGUNDOS
-            
-            this.pendingRequests.set(reqId, { 
+            }, 30000);
+
+            this.pendingRequests.set(reqId, {
                 resolve: (msg) => {
                     if (!msg.error) {
                         this.authorized = true;
@@ -154,9 +187,9 @@ class DerivClient extends EventEmitter {
                     } else {
                         reject(new Error(msg.error.message));
                     }
-                }, 
-                reject, 
-                timeout 
+                },
+                reject,
+                timeout
             });
             this.ws.send(JSON.stringify(req));
         });
@@ -182,27 +215,53 @@ class DerivClient extends EventEmitter {
                 this.pendingRequests.delete(reqId);
                 reject(new Error(`Timeout na requisição de candles (${symbol}, ${granularity}s)`));
             }, 30000);
-            
-            // ✅ MODIFICADO: extrair msg.candles ao invés de retornar a mensagem completa
-            this.pendingRequests.set(reqId, { 
+
+            this.pendingRequests.set(reqId, {
                 resolve: (msg) => {
                     if (msg.error) {
                         reject(new Error(msg.error.message));
                     } else if (msg.candles && Array.isArray(msg.candles)) {
-                        // ✅ Retorna APENAS o array de candles
                         resolve(msg.candles);
                     } else {
                         reject(new Error('Formato de resposta inválido da Deriv'));
                     }
-                }, 
-                reject, 
-                timeout 
+                },
+                reject,
+                timeout
             });
             this.ws.send(JSON.stringify(req));
         });
     }
 
+    // ✅ FIX: addListener e removeListener para ticks (usado por getCurrentPrice no server.js)
+    addListener(reqId, handler) {
+        this._tickListeners.set(reqId, handler);
+    }
+
+    removeListener(reqId, handler) {
+        this._tickListeners.delete(reqId);
+    }
+
+    // ✅ FIX: getConnectionStatus (chamado em /api/connection-status no server.js)
+    getConnectionStatus() {
+        const wsStateMap = { 0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED' };
+        return {
+            status: this.connected && this.authorized ? 'ready' :
+                    this.connected ? 'connected_not_authorized' :
+                    this.connecting ? 'connecting' : 'disconnected',
+            connected: this.connected,
+            authorized: this.authorized,
+            connecting: this.connecting,
+            wsReadyState: this.ws ? wsStateMap[this.ws.readyState] ?? 'UNKNOWN' : 'NO_SOCKET',
+            reconnectAttempts: this.reconnectAttempts,
+            pendingRequests: this.pendingRequests.size,
+            tickListeners: this._tickListeners.size,
+            uptime: Math.floor(process.uptime())
+        };
+    }
+
     startPing() {
+        this.stopPing(); // garante que não há duplicados
         this.pingInterval = setInterval(() => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 const pingReq = { ping: 1, req_id: this.reqId++ };
@@ -220,6 +279,7 @@ class DerivClient extends EventEmitter {
 
     disconnect() {
         this.stopPing();
+        this._rejectAllPending('Desconexão manual');
         if (this.ws) {
             this.ws.close();
         }
