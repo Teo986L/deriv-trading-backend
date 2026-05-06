@@ -13,6 +13,17 @@ const { detectLiquiditySweepRobusto, calculateATR: calcularATRLiquidity } = requ
 
 const app = express();
 
+// ========== FIX 1: PROTEÇÃO CONTRA CRASHES SILENCIOSOS ==========
+process.on('uncaughtException', (err) => {
+  console.error('❌ uncaughtException:', err.message, err.stack);
+  // NÃO faz process.exit() — mantém o servidor vivo
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ unhandledRejection em:', promise, 'razão:', reason);
+  // NÃO faz process.exit() — mantém o servidor vivo
+});
+
 // ========== CONFIGURAÇÕES DE SEGURANÇA ==========
 const SECRETS = {
 '7': process.env.SECRET_KEY_7_DAYS,
@@ -259,14 +270,51 @@ return res.status(403).json({ error: 'Token inválido ou expirado' });
 let derivClient = null;
 let derivConnectionPromise = null;
 
+// ========== FIX 2: RECONEXÃO AUTOMÁTICA DO DERIV WEBSOCKET ==========
 async function getDerivClient() {
-if (derivConnectionPromise) return derivConnectionPromise;
-if (!derivClient) derivClient = new DerivClient(API_TOKEN);
-derivConnectionPromise = derivClient.connect()
-.then(() => { console.log('✅ Cliente Deriv pronto'); return derivClient; })
-.catch(err => { console.error('❌ Falha conexão:', err); derivConnectionPromise = null; throw err; });
-return derivConnectionPromise;
+  // Se já existe e está conectado (readyState 1 = OPEN), devolve direto
+  if (derivClient && derivClient.ws?.readyState === 1) return derivClient;
+
+  // Limpa a promise antiga se o WS está morto
+  if (derivClient && derivClient.ws?.readyState !== 1) {
+    console.log('🔄 WS Deriv desconectado, a reconectar...');
+    derivConnectionPromise = null;
+    derivClient = null;
+  }
+
+  // Se há uma promise em voo, aguarda
+  if (derivConnectionPromise) return derivConnectionPromise;
+
+  derivClient = new DerivClient(API_TOKEN);
+  derivConnectionPromise = derivClient.connect()
+    .then(() => {
+      console.log('✅ Cliente Deriv pronto');
+      return derivClient;
+    })
+    .catch(err => {
+      console.error('❌ Falha conexão Deriv:', err.message);
+      derivConnectionPromise = null; // permite nova tentativa
+      derivClient = null;
+      throw err;
+    });
+
+  return derivConnectionPromise;
 }
+
+// Vigilante de reconexão automática a cada 4 minutos
+setInterval(async () => {
+  try {
+    if (!derivClient || derivClient.ws?.readyState !== 1) {
+      console.log('🔄 [Watchdog] Reconectando Deriv...');
+      derivConnectionPromise = null;
+      derivClient = null;
+      await getDerivClient();
+      console.log('✅ [Watchdog] Deriv reconectado com sucesso');
+    }
+  } catch (err) {
+    console.error('❌ [Watchdog] Reconexão Deriv falhou:', err.message);
+  }
+}, 4 * 60 * 1000); // a cada 4 minutos
 
 // ── tick com timeout reduzido (350ms) — fallback imediato para preço de candle ──
 async function getCurrentPrice(client, symbol) {
@@ -302,7 +350,18 @@ resolve(null);
 });
 }
 
-app.get('/health', (req, res) => res.status(200).send('OK'));
+// ========== FIX 4: ENDPOINT /health INFORMATIVO ==========
+app.get('/health', (req, res) => {
+  const derivStatus = derivClient?.ws?.readyState === 1 ? 'connected' : 'disconnected';
+  res.status(200).json({
+    status: 'OK',
+    uptime: Math.floor(process.uptime()),
+    deriv: derivStatus,
+    memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB',
+    cacheKeys: memoryCache.size,
+    timestamp: new Date().toISOString()
+  });
+});
 
 app.get('/api/trading-modes', (req, res) => {
 res.json({
@@ -798,8 +857,6 @@ if (mode === 'PESCADOR' && m15Timing?.permitido) timingOk = true;
 if (!hasTfDivergenceForLiquidity && liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk) {
     console.log(`⚠️ Liquidez substitui sinal → ${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%`);
     consolidated.signal = liquidityResult.direction;
-    // ✅ FIX: liquidityResult.confidence vem em escala 0-100 (inteiro percentual),
-    //    mas consolidated.confidence usa escala 0.0-1.0 — dividir por 100.
     consolidated.confidence = liquidityResult.confidence / 100;
     consolidated.simpleMajority.signal = liquidityResult.direction;
 } else if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && !timingOk) {
@@ -848,7 +905,7 @@ ponto_franco: consolidated.ponto_franco,
 alinhamento_pescador: consolidated.alinhamento_pescador,
 timing_especial: timingEspecial,
 primaryTrendNote: primaryTrendNote || null,
-timingRiskWarning: timingRiskWarning || null   // ← NOVO CAMPO
+timingRiskWarning: timingRiskWarning || null
 },
 agreement: {
 agreement: agreement.agreement, primarySignal: agreement.primarySignal,
@@ -899,9 +956,26 @@ console.log(`⚠️ Penalização "Perdendo Força": -8% primário / -4% secund�
 console.log(`🔧 FIX: liquidityResult.confidence normalizado para escala 0-1`);
 console.log(`🧭 Nota de tendência primária ativa`);
 console.log(`⛔ Penalização de Timing: limitada a 35% se o TF primário não confirma`);
+console.log(`🛡️  FIX 1: uncaughtException + unhandledRejection ativos`);
+console.log(`🔄 FIX 2: Watchdog de reconexão Deriv a cada 4 minutos ativo`);
+console.log(`💓 FIX 3: Self-ping anti-hibernação a cada 10 minutos ativo`);
+console.log(`❤️  FIX 4: /health com status detalhado ativo`);
 try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
 catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
+
+// ========== FIX 3: SELF-PING ANTI-HIBERNAÇÃO (backup ao UptimeRobot) ==========
+// Define RENDER_EXTERNAL_URL=https://o-teu-servico.onrender.com nas variáveis do Render
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+
+setInterval(async () => {
+  try {
+    const res = await fetch(`${SELF_URL}/health`);
+    console.log(`💓 Self-ping OK: ${res.status} | uptime: ${Math.floor(process.uptime())}s`);
+  } catch (err) {
+    console.error('⚠️ Self-ping falhou:', err.message);
+  }
+}, 10 * 60 * 1000); // a cada 10 minutos
 
 server.keepAliveTimeout = 120000;
 server.headersTimeout   = 120000;
