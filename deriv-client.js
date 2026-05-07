@@ -14,13 +14,11 @@ class DerivClient extends EventEmitter {
         this.pendingRequests = new Map();
         this.pingInterval = null;
         this.reconnectAttempts = 0;
-
-        // ✅ FIX: sem limite máximo — reconecta para sempre com backoff
         this.maxReconnectDelay = 60000; // máximo 60s entre tentativas
         this.reconnectDelay = 1000;
         this.connecting = false;
 
-        // ✅ FIX: Map de listeners para ticks (usado por getCurrentPrice no server.js)
+        // Map de listeners para ticks (usado por getCurrentPrice no server.js)
         this._tickListeners = new Map();
     }
 
@@ -30,7 +28,7 @@ class DerivClient extends EventEmitter {
                 reject(new Error('Já está conectando'));
                 return;
             }
-            if (this.connected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+            if (this.connected && this.authorized && this.ws && this.ws.readyState === WebSocket.OPEN) {
                 resolve(true);
                 return;
             }
@@ -42,7 +40,7 @@ class DerivClient extends EventEmitter {
                 if (this.connecting) {
                     this.ws.terminate();
                     this.connecting = false;
-                    reject(new Error('Timeout de conexão'));
+                    reject(new Error('Timeout de conexão WebSocket'));
                 }
             }, 15000);
 
@@ -50,15 +48,15 @@ class DerivClient extends EventEmitter {
                 clearTimeout(connectionTimeout);
                 this.connecting = false;
                 this.connected = true;
-                this.reconnectAttempts = 0; // reset ao conectar com sucesso
+                this.reconnectAttempts = 0;
                 console.log('✅ WebSocket conectado');
                 this.startPing();
-                this.authorize().then(() => {
-                    resolve(true);
-                }).catch((err) => {
-                    console.error('❌ Erro na autorização:', err);
-                    reject(err);
-                });
+                this.authorize()
+                    .then(() => resolve(true))
+                    .catch((err) => {
+                        console.error('❌ Erro na autorização:', err.message);
+                        reject(err);
+                    });
             });
 
             this.ws.on('message', (data) => {
@@ -78,7 +76,6 @@ class DerivClient extends EventEmitter {
                 this.authorized = false;
                 this.stopPing();
                 this.emit('error', err);
-                // Não rejeita aqui se já passou pelo 'open' — o 'close' vai tratar
                 reject(err);
             });
 
@@ -89,25 +86,21 @@ class DerivClient extends EventEmitter {
                 this.connected = false;
                 this.authorized = false;
                 this.stopPing();
-
-                // Rejeita todas as pendentes para não ficarem presas
                 this._rejectAllPending('WebSocket fechado inesperadamente');
-
                 this.emit('close', code, reason);
                 this._reconnect();
             });
         });
     }
 
-    // ✅ FIX: reconexão infinita com backoff exponencial até 60s (nunca desiste)
+    // Reconexão infinita com backoff exponencial até 60s (nunca desiste)
     _reconnect() {
-        // Backoff exponencial: 1s, 2s, 4s, 8s, 16s, 32s, 60s, 60s, 60s...
         const delay = Math.min(
             this.reconnectDelay * Math.pow(2, this.reconnectAttempts),
             this.maxReconnectDelay
         );
         this.reconnectAttempts++;
-        console.log(`🔄 Tentando reconectar em ${delay}ms (tentativa ${this.reconnectAttempts})`);
+        console.log(`🔄 Reconectando em ${delay}ms (tentativa ${this.reconnectAttempts})`);
 
         setTimeout(() => {
             this.connect().catch(err => {
@@ -117,11 +110,11 @@ class DerivClient extends EventEmitter {
         }, delay);
     }
 
-    // ✅ FIX: rejeita todos os pedidos pendentes quando o WS fecha
+    // Rejeita todos os pedidos pendentes quando o WS fecha
     _rejectAllPending(reason) {
         if (this.pendingRequests.size > 0) {
             console.log(`⚠️ Rejeitando ${this.pendingRequests.size} pedidos pendentes: ${reason}`);
-            for (const [id, { reject, timeout }] of this.pendingRequests) {
+            for (const [, { reject, timeout }] of this.pendingRequests) {
                 clearTimeout(timeout);
                 reject(new Error(reason));
             }
@@ -130,13 +123,33 @@ class DerivClient extends EventEmitter {
     }
 
     _handleMessage(msg) {
+        // ════════════════════════════════════════════════════════════════
+        // ✅ BUG CRÍTICO CORRIGIDO:
+        // O código anterior fazia return após registar this.authorized = true,
+        // sem nunca resolver a Promise armazenada em pendingRequests.
+        // Isso fazia com que authorize() SEMPRE esperasse 30s e falhasse
+        // com "Timeout na autorização", mesmo o WS estando conectado.
+        // ════════════════════════════════════════════════════════════════
         if (msg.msg_type === 'authorize') {
             if (!msg.error) {
                 this.authorized = true;
                 console.log('✅ Autorizado com sucesso');
             } else {
-                console.error('❌ Erro autorização:', msg.error);
+                console.error('❌ Erro autorização:', msg.error.message);
                 this.authorized = false;
+            }
+
+            // ✅ AGORA resolve/rejeita a Promise corretamente
+            const reqId = msg.echo_req?.req_id;
+            if (reqId && this.pendingRequests.has(reqId)) {
+                const { resolve, reject, timeout } = this.pendingRequests.get(reqId);
+                clearTimeout(timeout);
+                this.pendingRequests.delete(reqId);
+                if (msg.error) {
+                    reject(new Error(msg.error.message));
+                } else {
+                    resolve(msg);
+                }
             }
             return;
         }
@@ -145,7 +158,7 @@ class DerivClient extends EventEmitter {
             return;
         }
 
-        // ✅ FIX: distribui ticks para os listeners do getCurrentPrice
+        // Distribui ticks para os listeners do getCurrentPrice
         if (msg.msg_type === 'tick' && msg.tick) {
             for (const [, handler] of this._tickListeners) {
                 try { handler(msg); } catch (e) { /* ignora erros no handler */ }
@@ -153,6 +166,7 @@ class DerivClient extends EventEmitter {
             return;
         }
 
+        // Resolve pedidos normais (candles, etc.)
         const reqId = msg.echo_req?.req_id;
         if (reqId && this.pendingRequests.has(reqId)) {
             const { resolve, reject, timeout } = this.pendingRequests.get(reqId);
@@ -182,7 +196,6 @@ class DerivClient extends EventEmitter {
             this.pendingRequests.set(reqId, {
                 resolve: (msg) => {
                     if (!msg.error) {
-                        this.authorized = true;
                         resolve(true);
                     } else {
                         reject(new Error(msg.error.message));
@@ -233,16 +246,16 @@ class DerivClient extends EventEmitter {
         });
     }
 
-    // ✅ FIX: addListener e removeListener para ticks (usado por getCurrentPrice no server.js)
+    // addListener e removeListener para ticks (usado por getCurrentPrice no server.js)
     addListener(reqId, handler) {
         this._tickListeners.set(reqId, handler);
     }
 
-    removeListener(reqId, handler) {
+    removeListener(reqId) {
         this._tickListeners.delete(reqId);
     }
 
-    // ✅ FIX: getConnectionStatus (chamado em /api/connection-status no server.js)
+    // getConnectionStatus (chamado em /api/connection-status no server.js)
     getConnectionStatus() {
         const wsStateMap = { 0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED' };
         return {
@@ -252,7 +265,7 @@ class DerivClient extends EventEmitter {
             connected: this.connected,
             authorized: this.authorized,
             connecting: this.connecting,
-            wsReadyState: this.ws ? wsStateMap[this.ws.readyState] ?? 'UNKNOWN' : 'NO_SOCKET',
+            wsReadyState: this.ws ? (wsStateMap[this.ws.readyState] ?? 'UNKNOWN') : 'NO_SOCKET',
             reconnectAttempts: this.reconnectAttempts,
             pendingRequests: this.pendingRequests.size,
             tickListeners: this._tickListeners.size,
@@ -261,11 +274,10 @@ class DerivClient extends EventEmitter {
     }
 
     startPing() {
-        this.stopPing(); // garante que não há duplicados
+        this.stopPing(); // garante que não há intervalos duplicados
         this.pingInterval = setInterval(() => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                const pingReq = { ping: 1, req_id: this.reqId++ };
-                this.ws.send(JSON.stringify(pingReq));
+                this.ws.send(JSON.stringify({ ping: 1, req_id: this.reqId++ }));
             }
         }, 30000);
     }
