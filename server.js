@@ -275,9 +275,13 @@ async function getDerivClient() {
   // Se já existe e está conectado (readyState 1 = OPEN), devolve direto
   if (derivClient && derivClient.ws?.readyState === 1) return derivClient;
 
-  // Limpa a promise antiga se o WS está morto
+  // ✅ FIX BUG 1: Antes de abandonar o cliente antigo, chamar disconnect()
+  // para activar a flag _shouldReconnect = false no DerivClient.
+  // Sem isto, o cliente antigo continuava a reconectar em background,
+  // criando duas conexões WS simultâneas → rate limiting → timeouts de 30s.
   if (derivClient && derivClient.ws?.readyState !== 1) {
     console.log('🔄 WS Deriv desconectado, a reconectar...');
+    derivClient.disconnect(); // ← CORRIGIDO: mata o _reconnect() interno
     derivConnectionPromise = null;
     derivClient = null;
   }
@@ -307,7 +311,11 @@ setInterval(async () => {
     if (!derivClient || derivClient.ws?.readyState !== 1) {
       console.log('🔄 [Watchdog] Reconectando Deriv...');
       derivConnectionPromise = null;
-      derivClient = null;
+      // ✅ FIX BUG 1: Desligar o cliente antigo antes de criar novo
+      if (derivClient) {
+        derivClient.disconnect();
+        derivClient = null;
+      }
       await getDerivClient();
       console.log('✅ [Watchdog] Deriv reconectado com sucesso');
     }
@@ -783,7 +791,14 @@ volatilidade: a.volatilidade || 1.0, precoAtual: a.preco_atual || currentPrice, 
 const bot = new TraderBotAnalise({ confiancaMinimaOperar: 60, confiancaAlta: 75, adxTendenciaForte: 25, adxSemTendencia: 20 });
 const analise = bot.gerarAnalise(dadosMercado, modeMap[mode] || 'CACADOR');
 const risco   = bot.validarOperacao(analise, req.user?.saldo || 1000, 2);
-console.log(`📊 Refinada: ${analise.sinal.direcao} ${analise.sinal.confianca}%`);
+
+// ✅ FIX BUG 2: analise.sinal pode ser undefined quando os candles falharam
+// e o bot não teve dados suficientes para gerar um sinal completo.
+// Usar optional chaining evita o crash "Cannot read properties of undefined".
+const direcao   = analise?.sinal?.direcao   ?? 'N/A';
+const confianca = analise?.sinal?.confianca ?? 0;
+console.log(`📊 Refinada: ${direcao} ${confianca}%`);
+
 return { analiseRefinada: analise, validacaoRisco: risco };
 } catch (err) {
 console.error('❌ analiseRefinada:', err.message);
@@ -960,6 +975,9 @@ console.log(`🛡️  FIX 1: uncaughtException + unhandledRejection ativos`);
 console.log(`🔄 FIX 2: Watchdog de reconexão Deriv a cada 4 minutos ativo`);
 console.log(`💓 FIX 3: Self-ping anti-hibernação a cada 10 minutos ativo`);
 console.log(`❤️  FIX 4: /health com status detalhado ativo`);
+console.log(`🔌 FIX BUG1: disconnect() antes de abandonar cliente Deriv ativo`);
+console.log(`🔌 FIX BUG2: optional chaining em analise.sinal ativo`);
+console.log(`⏱️  FIX BUG3: timeout getCandles reduzido para 12s`);
 try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
 catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
