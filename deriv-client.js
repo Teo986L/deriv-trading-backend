@@ -18,6 +18,12 @@ class DerivClient extends EventEmitter {
         this.reconnectDelay = 1000;
         this.connecting = false;
 
+        // ✅ FIX BUG 1: Flag para cancelar reconexão interna quando o servidor
+        // abandona este cliente e cria um novo. Sem isto, o cliente antigo
+        // continuava a reconectar em paralelo → duas conexões WS simultâneas
+        // → rate limiting da Deriv → timeouts de 30s.
+        this._shouldReconnect = true;
+
         // Map de listeners para ticks (usado por getCurrentPrice no server.js)
         this._tickListeners = new Map();
     }
@@ -95,6 +101,13 @@ class DerivClient extends EventEmitter {
 
     // Reconexão infinita com backoff exponencial até 60s (nunca desiste)
     _reconnect() {
+        // ✅ FIX BUG 1: Se o servidor chamou disconnect(), não reconectar.
+        // Evita ter dois DerivClients activos em simultâneo.
+        if (!this._shouldReconnect) {
+            console.log('🛑 _reconnect() cancelado (cliente abandonado pelo servidor)');
+            return;
+        }
+
         const delay = Math.min(
             this.reconnectDelay * Math.pow(2, this.reconnectAttempts),
             this.maxReconnectDelay
@@ -103,6 +116,9 @@ class DerivClient extends EventEmitter {
         console.log(`🔄 Reconectando em ${delay}ms (tentativa ${this.reconnectAttempts})`);
 
         setTimeout(() => {
+            // Verificar novamente antes de reconectar (pode ter sido desligado
+            // durante o delay do setTimeout)
+            if (!this._shouldReconnect) return;
             this.connect().catch(err => {
                 console.error('❌ Falha na reconexão:', err.message);
                 // _reconnect() será chamado novamente pelo evento 'close'
@@ -224,10 +240,15 @@ class DerivClient extends EventEmitter {
                 req_id: this.reqId++
             };
             const reqId = req.req_id;
+
+            // ✅ FIX BUG 3: Timeout reduzido de 30000ms para 12000ms.
+            // Com 30s, qualquer WS degradado bloqueava toda a análise durante
+            // meio minuto. 12s é suficiente para a Deriv responder em condições
+            // normais e falha rápido quando há problemas.
             const timeout = setTimeout(() => {
                 this.pendingRequests.delete(reqId);
                 reject(new Error(`Timeout na requisição de candles (${symbol}, ${granularity}s)`));
-            }, 30000);
+            }, 12000);
 
             this.pendingRequests.set(reqId, {
                 resolve: (msg) => {
@@ -269,6 +290,7 @@ class DerivClient extends EventEmitter {
             reconnectAttempts: this.reconnectAttempts,
             pendingRequests: this.pendingRequests.size,
             tickListeners: this._tickListeners.size,
+            shouldReconnect: this._shouldReconnect,
             uptime: Math.floor(process.uptime())
         };
     }
@@ -290,6 +312,10 @@ class DerivClient extends EventEmitter {
     }
 
     disconnect() {
+        // ✅ FIX BUG 1: Sinaliza que este cliente não deve reconectar.
+        // Isto impede que _reconnect() crie uma nova ligação depois de
+        // o servidor já ter criado um DerivClient de substituição.
+        this._shouldReconnect = false;
         this.stopPing();
         this._rejectAllPending('Desconexão manual');
         if (this.ws) {
