@@ -490,43 +490,100 @@ if (alerta) console.log(`🔔 ${timeframeLabel} ${alerta.nivel}: RSI=${rsi.toFix
 return alerta;
 }
 
-// ── Funções de timing (compactas, mesma lógica) ──────────────────────────────
+// ── Funções de timing (com RSI windows específicos por tipo de ativo) ────────
 function buildTimingResult(analysis, signal, tf, label) {
-if (!analysis) return { permitido: false, motivo: `${label} não disponível`, rsi: null, sinal: null, adx: null, alerta_pullback: null };
-const adx = analysis.adx || 0;
-const rsi = analysis.rsi || 50;
-const temTendencia = adx >= 22;
-const tipoAtivo = analysis.tipo_ativo || 'indice_normal';
-const alerta_pullback = gerarAlertaPullback(rsi, signal, tipoAtivo, label);
+  if (!analysis) return { permitido: false, motivo: `${label} não disponível`, rsi: null, sinal: null, adx: null, alerta_pullback: null };
 
-if (signal === 'HOLD') return { permitido: false, motivo: 'Sinal HOLD - aguardar', rsi, sinal: analysis.sinal, adx, alerta_pullback };
+  const adx       = analysis.adx || 0;
+  const rsi       = analysis.rsi || 50;
+  const tipoAtivo = analysis.tipo_ativo || 'indice_normal';
+  const alerta_pullback = gerarAlertaPullback(rsi, signal, tipoAtivo, label);
 
-const rsiMax   = label === 'M15' ? 72 : 75;
-const rsiMin   = label === 'M15' ? 28 : 25;
-const rsiOSell = label === 'M15' ? 36 : 38;
-const rsiOBuy  = label === 'M15' ? 65 : 62;
+  if (signal === 'HOLD') return { permitido: false, motivo: 'Sinal HOLD - aguardar', rsi, sinal: analysis.sinal, adx, alerta_pullback };
 
-if (signal === 'CALL') {
-if (analysis.sinal === 'CALL' && rsi < rsiMax) return { permitido: true, motivo: `${label} confirmando CALL (ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
-if (analysis.sinal === 'PUT'  && rsi < rsiOSell) return { permitido: true, motivo: `${label} oversold - reversão CALL (ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
-}
-if (signal === 'PUT') {
-if (analysis.sinal === 'PUT'  && rsi > rsiMin) return { permitido: true, motivo: `${label} confirmando PUT (ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
-if (analysis.sinal === 'CALL' && rsi > rsiOBuy) return { permitido: true, motivo: `${label} overbought - reversão PUT (ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
-}
-return { permitido: false, motivo: `${label} não confirma (${analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
+  // ── RSI windows por tipo de ativo ─────────────────────────────────────────
+  // Boom:  spike vai para CIMA  → comprar na retração (RSI baixo/médio)
+  //        se RSI > 62, o spike já aconteceu → TIMING BLOQUEADO para CALL
+  // Crash: spike vai para BAIXO → vender no rali (RSI alto/médio)
+  //        se RSI < 38, o crash já aconteceu → TIMING BLOQUEADO para PUT
+  // Jump:  pulsos em ambas as direções → janela simétrica estreita (35–65)
+  // Step:  passos mecânicos fixos → RSI raramente vai a extremos → janela
+  //        mais apertada ainda (38–62); desvios fora dela indicam ruído
+  // Outros: comportamento original (sem alteração)
+  // ──────────────────────────────────────────────────────────────────────────
+  let rsiMax, rsiMin, rsiOSell, rsiOBuy;
+
+  if (tipoAtivo === 'boom_index') {
+    rsiMax   = 62;  // acima disto, spike de alta já ocorreu
+    rsiMin   = 22;
+    rsiOSell = 35;  // oversold → reversão CALL
+    rsiOBuy  = 68;  // overbought → reversão PUT (raro no Boom)
+
+  } else if (tipoAtivo === 'crash_index') {
+    rsiMax   = 78;
+    rsiMin   = 38;  // abaixo disto, crash já ocorreu
+    rsiOSell = 32;  // oversold → reversão CALL (raro no Crash)
+    rsiOBuy  = 62;  // overbought → reversão PUT
+
+  } else if (tipoAtivo === 'jump_index') {
+    rsiMax   = 65;  // acima disto, jump de alta já ocorreu
+    rsiMin   = 35;  // abaixo disto, jump de baixa já ocorreu
+    rsiOSell = 40;
+    rsiOBuy  = 60;
+
+  } else if (tipoAtivo === 'step_index') {
+    rsiMax   = 62;  // pressão compradora esgotada
+    rsiMin   = 38;  // pressão vendedora esgotada
+    rsiOSell = 40;
+    rsiOBuy  = 60;
+
+  } else {
+    // Comportamento original para Forex, Volatility, Cripto, etc.
+    rsiMax   = label === 'M15' ? 72 : 75;
+    rsiMin   = label === 'M15' ? 28 : 25;
+    rsiOSell = label === 'M15' ? 36 : 38;
+    rsiOBuy  = label === 'M15' ? 65 : 62;
+  }
+
+  if (signal === 'CALL') {
+    if (analysis.sinal === 'CALL' && rsi < rsiMax) return { permitido: true, motivo: `${label} confirmando CALL (RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
+    if (analysis.sinal === 'PUT'  && rsi < rsiOSell) return { permitido: true, motivo: `${label} oversold - reversão CALL (RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
+
+    // Mensagem de bloqueio específica
+    let motivoBloqueio;
+    if (tipoAtivo === 'boom_index'  && rsi >= rsiMax) motivoBloqueio = `${label} BLOQUEADO — RSI ${rsi.toFixed(0)} > ${rsiMax} no Boom (spike já ocorreu, aguardar retração)`;
+    else if (tipoAtivo === 'jump_index'  && rsi >= rsiMax) motivoBloqueio = `${label} BLOQUEADO — RSI ${rsi.toFixed(0)} > ${rsiMax} no Jump (pulso de alta já ocorreu)`;
+    else if (tipoAtivo === 'step_index'  && rsi >= rsiMax) motivoBloqueio = `${label} BLOQUEADO — RSI ${rsi.toFixed(0)} > ${rsiMax} no Step (pressão compradora esgotada, aguardar recuo)`;
+    else motivoBloqueio = `${label} não confirma (${analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`;
+    return { permitido: false, motivo: motivoBloqueio, rsi, sinal: analysis.sinal, adx, alerta_pullback };
+  }
+
+  if (signal === 'PUT') {
+    if (analysis.sinal === 'PUT'  && rsi > rsiMin) return { permitido: true, motivo: `${label} confirmando PUT (RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
+    if (analysis.sinal === 'CALL' && rsi > rsiOBuy) return { permitido: true, motivo: `${label} overbought - reversão PUT (RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
+
+    // Mensagem de bloqueio específica
+    let motivoBloqueio;
+    if (tipoAtivo === 'crash_index' && rsi <= rsiMin) motivoBloqueio = `${label} BLOQUEADO — RSI ${rsi.toFixed(0)} < ${rsiMin} no Crash (crash já ocorreu, aguardar recuperação)`;
+    else if (tipoAtivo === 'jump_index'  && rsi <= rsiMin) motivoBloqueio = `${label} BLOQUEADO — RSI ${rsi.toFixed(0)} < ${rsiMin} no Jump (pulso de baixa já ocorreu)`;
+    else if (tipoAtivo === 'step_index'  && rsi <= rsiMin) motivoBloqueio = `${label} BLOQUEADO — RSI ${rsi.toFixed(0)} < ${rsiMin} no Step (pressão vendedora esgotada, aguardar recuperação)`;
+    else motivoBloqueio = `${label} não confirma (${analysis.sinal}, RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`;
+    return { permitido: false, motivo: motivoBloqueio, rsi, sinal: analysis.sinal, adx, alerta_pullback };
+  }
+
+  return { permitido: false, motivo: `${label} sinal indeterminado (RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
 }
 
 function calcularTimingM1(a, s)  { return buildTimingResult(a, s, 'M1',  'M1'); }
 function calcularTimingM5(a, s)  { return buildTimingResult(a, s, 'M5',  'M5'); }
 function calcularTimingM15(a, s) { return buildTimingResult(a, s, 'M15', 'M15'); }
 function calcularTimingH1(a, s) {
-if (!a) return { permitido: false, motivo: 'H1 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
-return { permitido: false, motivo: 'H1 é TF de tendência', rsi: a.rsi || 50, sinal: a.sinal, adx: a.adx || 0, alerta_pullback: gerarAlertaPullback(a.rsi || 50, s, a.tipo_ativo || 'indice_normal', 'H1') };
+  if (!a) return { permitido: false, motivo: 'H1 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
+  return { permitido: false, motivo: 'H1 é TF de tendência', rsi: a.rsi || 50, sinal: a.sinal, adx: a.adx || 0, alerta_pullback: gerarAlertaPullback(a.rsi || 50, s, a.tipo_ativo || 'indice_normal', 'H1') };
 }
 function calcularTimingH4(a, s) {
-if (!a) return { permitido: false, motivo: 'H4 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
-return { permitido: false, motivo: 'H4 é TF de tendência', rsi: a.rsi || 50, sinal: a.sinal, adx: a.adx || 0, alerta_pullback: gerarAlertaPullback(a.rsi || 50, s, a.tipo_ativo || 'indice_normal', 'H4') };
+  if (!a) return { permitido: false, motivo: 'H4 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
+  return { permitido: false, motivo: 'H4 é TF de tendência', rsi: a.rsi || 50, sinal: a.sinal, adx: a.adx || 0, alerta_pullback: gerarAlertaPullback(a.rsi || 50, s, a.tipo_ativo || 'indice_normal', 'H4') };
 }
 
 // ── Detetor de tipo de ativo (9 tipos, todos os símbolos do frontend) ─────────
