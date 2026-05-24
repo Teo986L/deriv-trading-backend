@@ -747,11 +747,30 @@ const PRIMARY_TF_OPEN_MAP = {
   'PESCADOR': 'M15' 
 };
 const primaryOpenTf = PRIMARY_TF_OPEN_MAP[mode];
-const primaryCandles = candlesMap[primaryOpenTf];
-const currentOpenCandle = primaryCandles?.at(-1);
-const candleOpenPrice = currentOpenCandle?.open ?? null;
+const primaryTfSeconds = ALL_TIMEFRAMES_CONFIG[primaryOpenTf]?.seconds || 60;
+const primaryCandles   = candlesMap[primaryOpenTf];
 
-console.log(`🕯️  Open do ${primaryOpenTf} atual: ${candleOpenPrice}`);
+// Calcular o epoch exato de início do candle atual pelo relógio do servidor
+const nowSec             = Math.floor(Date.now() / 1000);
+const currentCandleEpoch = nowSec - (nowSec % primaryTfSeconds);
+
+let candleOpenPrice = null;
+
+if (primaryCandles && primaryCandles.length > 0) {
+  // 1ª opção: candle em formação com epoch exato do período atual
+  const exactCandle = primaryCandles.find(c => c.epoch === currentCandleEpoch);
+
+  if (exactCandle) {
+    candleOpenPrice = exactCandle.open;
+    console.log(`🕯️  Open ${primaryOpenTf} (epoch exato ${currentCandleEpoch}): ${candleOpenPrice}`);
+  } else {
+    // 2ª opção: último candle fechado antes do epoch atual
+    const candidatos    = primaryCandles.filter(c => c.epoch <= currentCandleEpoch);
+    const fallbackCandle = candidatos.length > 0 ? candidatos[candidatos.length - 1] : null;
+    candleOpenPrice     = fallbackCandle?.open ?? null;
+    console.log(`🕯️  Open ${primaryOpenTf} (fallback epoch ${fallbackCandle?.epoch}): ${candleOpenPrice}`);
+  }
+}
 
 // ── 7. Preço: Tick = preço corrente (onde está agora)
 const tickResult = await tickPromise;
