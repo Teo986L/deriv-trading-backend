@@ -537,8 +537,6 @@ class SistemaAnaliseInteligente {
             divergencia_macd: divergenciaMACD
         };
         
-        this.multiTimeframeManager.addAnalysis(timeframeKey, analiseAtual);
-
         // 🔥 REMOVIDO: consolidateSignals() NÃO deve ser chamado aqui
         // const consolidated = this.multiTimeframeManager.consolidateSignals();
         
