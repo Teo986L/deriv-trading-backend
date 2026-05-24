@@ -8,7 +8,7 @@ const ElliottWaveMaster = require('./elliott-wave');
 const AdvancedMarketAnalyzer = require('./advanced-market');
 const AnaliseVelocidadeIndicadores = require('./velocidade');
 const ZonaDeOuroPremium = require('./zona-ouro');
-// this.multiTimeframeManager.addAnalysis(timeframeKey, analiseAtual);  // ← REMOVER ESTA LINHA
+this.multiTimeframeManager.addAnalysis(timeframeKey, analiseAtual);
 const { calcularRSI, calcularMACD, calcularADXCompleto, calcularVolatilidade } = require('../indicators');
 const { INDICATOR_CONFIG, TRADING_MODE, MARKET_STATE, CANDLE_CLOSE_TOLERANCE } = require('../config');
 const { institutionalSniper } = require('../institutional-sniper');
