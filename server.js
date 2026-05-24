@@ -740,20 +740,46 @@ consolidated.simpleMajority.signal = 'HOLD';
 consolidated.signal = 'HOLD';
 consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
+  // ── PREÇO DE ABERTURA DO TF PRIMÁRIO DO MODO ──────────────────────────────
+const PRIMARY_TF_OPEN_MAP = { 
+  'SNIPER':   'M1', 
+  'CAÇADOR':  'M5', 
+  'PESCADOR': 'M15' 
+};
+const primaryOpenTf = PRIMARY_TF_OPEN_MAP[mode];
+const primaryCandles = candlesMap[primaryOpenTf];
+const currentOpenCandle = primaryCandles?.at(-1);
+const candleOpenPrice = currentOpenCandle?.open ?? null;
 
-// ── 7. Preço: tick já deve ter resolvido (ou cai no fallback do candle) ───────
+console.log(`🕯️  Open do ${primaryOpenTf} atual: ${candleOpenPrice}`);
+
+// ── 7. Preço: Tick = preço corrente (onde está agora)
 const tickResult = await tickPromise;
 let currentPrice = 0, priceSource = 'unknown';
+
 if (tickResult) {
-currentPrice = tickResult; priceSource = 'tick';
-console.log(`💰 tick: ${currentPrice}`);
+  currentPrice = tickResult; 
+  priceSource = 'tick';
 } else {
-for (const tf of ['M1','M5','M15','H1','H4']) {
-const p = mtfManager.timeframes[tf]?.analysis?.preco_atual;
-if (p) { currentPrice = p; priceSource = tf; break; }
+  for (const tf of ['M1', 'M5', 'M15', 'H1', 'H4']) {
+    const p = mtfManager.timeframes[tf]?.analysis?.preco_atual;
+    if (p) { currentPrice = p; priceSource = tf; break; }
+  }
 }
-console.log(`💰 fallback (${priceSource}): ${currentPrice}`);
-}
+
+// ─── NOVO: diferença entre open do candle e preço atual ─────────────────────
+const priceMovedFromOpen = (candleOpenPrice && currentPrice)
+  ? parseFloat((currentPrice - candleOpenPrice).toFixed(5))
+  : null;
+
+const priceMovedDirection = priceMovedFromOpen !== null
+  ? (priceMovedFromOpen > 0 ? 'SUBIU' : priceMovedFromOpen < 0 ? 'CAIU' : 'LATERAL')
+  : null;
+
+console.log(
+  `💰 Atual: ${currentPrice} | Open ${primaryOpenTf}: ${candleOpenPrice} ` +
+  `| Movimento: ${priceMovedFromOpen > 0 ? '+' : ''}${priceMovedFromOpen} (${priceMovedDirection})`
+);
 
 // ═══════════════════════════════════════════════════════════════
 // FIX: Penalização por "Perdendo Força" — agora proporcional e
@@ -965,6 +991,12 @@ simpleMajority: consolidated.simpleMajority,
 timeframesAnalyzed: agreement.totalTimeframes,
 sinal_premium: consolidated.sinal_premium || null,
 price: currentPrice, priceSource,
+// ── NOVO ──────────────────────────────────────────────
+candleOpenPrice,               // open do candle do TF primário do modo
+candleOpenTf: primaryOpenTf,   // qual TF (M1, M5 ou M15)
+priceMovedFromOpen,            // ex: +0.00032 ou -0.00015
+priceMovedDirection,           // 'SUBIU' | 'CAIU' | 'LATERAL'
+// ──────────────────────────────────────────────────────  
 tipo_ativo: tipoAtivo,
 ...(m1Timing  && { m1_timing:  m1Timing  }),
 ...(m5Timing  && { m5_timing:  m5Timing  }),
