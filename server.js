@@ -740,65 +740,20 @@ consolidated.simpleMajority.signal = 'HOLD';
 consolidated.signal = 'HOLD';
 consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
-  // ── PREÇO DE ABERTURA DO TF PRIMÁRIO DO MODO ──────────────────────────────
-const PRIMARY_TF_OPEN_MAP = { 
-  'SNIPER':   'M1', 
-  'CAÇADOR':  'M5', 
-  'PESCADOR': 'M15' 
-};
-const primaryOpenTf = PRIMARY_TF_OPEN_MAP[mode];
-const primaryTfSeconds = ALL_TIMEFRAMES_CONFIG[primaryOpenTf]?.seconds || 60;
-const primaryCandles   = candlesMap[primaryOpenTf];
 
-// Calcular o epoch exato de início do candle atual pelo relógio do servidor
-const nowSec             = Math.floor(Date.now() / 1000);
-const currentCandleEpoch = nowSec - (nowSec % primaryTfSeconds);
-
-let candleOpenPrice = null;
-
-if (primaryCandles && primaryCandles.length > 0) {
-  // 1ª opção: candle em formação com epoch exato do período atual
-  const exactCandle = primaryCandles.find(c => c.epoch === currentCandleEpoch);
-
-  if (exactCandle) {
-    candleOpenPrice = exactCandle.open;
-    console.log(`🕯️  Open ${primaryOpenTf} (epoch exato ${currentCandleEpoch}): ${candleOpenPrice}`);
-  } else {
-    // 2ª opção: último candle fechado antes do epoch atual
-    const candidatos    = primaryCandles.filter(c => c.epoch <= currentCandleEpoch);
-    const fallbackCandle = candidatos.length > 0 ? candidatos[candidatos.length - 1] : null;
-    candleOpenPrice     = fallbackCandle?.open ?? null;
-    console.log(`🕯️  Open ${primaryOpenTf} (fallback epoch ${fallbackCandle?.epoch}): ${candleOpenPrice}`);
-  }
-}
-
-// ── 7. Preço: Tick = preço corrente (onde está agora)
+// ── 7. Preço: tick já deve ter resolvido (ou cai no fallback do candle) ───────
 const tickResult = await tickPromise;
 let currentPrice = 0, priceSource = 'unknown';
-
 if (tickResult) {
-  currentPrice = tickResult; 
-  priceSource = 'tick';
+currentPrice = tickResult; priceSource = 'tick';
+console.log(`💰 tick: ${currentPrice}`);
 } else {
-  for (const tf of ['M1', 'M5', 'M15', 'H1', 'H4']) {
-    const p = mtfManager.timeframes[tf]?.analysis?.preco_atual;
-    if (p) { currentPrice = p; priceSource = tf; break; }
-  }
+for (const tf of ['M1','M5','M15','H1','H4']) {
+const p = mtfManager.timeframes[tf]?.analysis?.preco_atual;
+if (p) { currentPrice = p; priceSource = tf; break; }
 }
-
-// ─── NOVO: diferença entre open do candle e preço atual ─────────────────────
-const priceMovedFromOpen = (candleOpenPrice && currentPrice)
-  ? parseFloat((currentPrice - candleOpenPrice).toFixed(5))
-  : null;
-
-const priceMovedDirection = priceMovedFromOpen !== null
-  ? (priceMovedFromOpen > 0 ? 'SUBIU' : priceMovedFromOpen < 0 ? 'CAIU' : 'LATERAL')
-  : null;
-
-console.log(
-  `💰 Atual: ${currentPrice} | Open ${primaryOpenTf}: ${candleOpenPrice} ` +
-  `| Movimento: ${priceMovedFromOpen > 0 ? '+' : ''}${priceMovedFromOpen} (${priceMovedDirection})`
-);
+console.log(`💰 fallback (${priceSource}): ${currentPrice}`);
+}
 
 // ═══════════════════════════════════════════════════════════════
 // FIX: Penalização por "Perdendo Força" — agora proporcional e
@@ -1010,12 +965,6 @@ simpleMajority: consolidated.simpleMajority,
 timeframesAnalyzed: agreement.totalTimeframes,
 sinal_premium: consolidated.sinal_premium || null,
 price: currentPrice, priceSource,
-// ── NOVO ──────────────────────────────────────────────
-candleOpenPrice,               // open do candle do TF primário do modo
-candleOpenTf: primaryOpenTf,   // qual TF (M1, M5 ou M15)
-priceMovedFromOpen,            // ex: +0.00032 ou -0.00015
-priceMovedDirection,           // 'SUBIU' | 'CAIU' | 'LATERAL'
-// ──────────────────────────────────────────────────────  
 tipo_ativo: tipoAtivo,
 ...(m1Timing  && { m1_timing:  m1Timing  }),
 ...(m5Timing  && { m5_timing:  m5Timing  }),
