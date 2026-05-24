@@ -743,10 +743,30 @@ let currentPrice = tickResult;
 let priceSource = 'tick';
 
 if (!currentPrice) {
-  // Fallback: usa o preço do último candle do TF primário
+  // Fallback 1: tenta preço do último candle do TF primário (já em cache)
   for (const tf of [primaryTf, 'M1', 'M5', 'M15', 'H1', 'H4']) {
     const p = mtfManager.timeframes[tf]?.analysis?.preco_atual;
-    if (p) { currentPrice = p; priceSource = tf; break; }
+    if (p) { currentPrice = p; priceSource = `fallback_${tf}`; break; }
+  }
+  
+  // Fallback 2: se ainda sem preço, busca o último candle M1 diretamente (sem cache)
+  if (!currentPrice) {
+    try {
+      const freshM1 = await client.getCandles(symbol, 1, 60); // 1 candle de 1 min
+      if (freshM1 && freshM1.length > 0) {
+        currentPrice = parseFloat(freshM1[freshM1.length - 1].close);
+        priceSource = 'fallback_freshM1';
+        console.log(`⚠️ Tick falhou, usando último M1 fechado: ${currentPrice}`);
+      }
+    } catch (err) {
+      console.error('❌ Fallback M1 falhou:', err.message);
+    }
+  }
+  
+  // Fallback 3: último recurso — usar candleOpenPrice se nada mais funcionar
+  if (!currentPrice && candleOpenPrice) {
+    currentPrice = candleOpenPrice;
+    priceSource = 'fallback_open';
   }
 }
 
