@@ -649,19 +649,6 @@ if (tipoAtivo === 'criptomoeda') tf.candleCount = 60; // cripto: ainda mais ráp
 return tf;
 });
 
-// ═══════════════════════════════════════════════════════════════
-// Determinar o timeframe principal do modo e o TTL unificado
-// ═══════════════════════════════════════════════════════════════
-let primaryTf;
-if (mode === 'SNIPER') primaryTf = 'M1';
-else if (mode === 'CAÇADOR') primaryTf = 'M5';
-else if (mode === 'PESCADOR') primaryTf = 'M15';
-else primaryTf = 'M5'; // fallback
-
-const primaryTfConfig = ALL_TIMEFRAMES_CONFIG[primaryTf];
-const cacheTTL = primaryTfConfig ? getTTLAlignedToCandle(primaryTfConfig.seconds) : 30;
-
-console.log(`⏱️  Cache TTL unificado: ${cacheTTL}s (alinhado com fecho do ${primaryTf})`);
 
 // ── 3. Fetch candles + tick em PARALELO ──────────────────────────────────────
 const tickPromise = getCurrentPrice(client, symbol);
@@ -672,7 +659,7 @@ allTfKeys.map(async (tfKey) => {
 const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
 if (!tf) return;
 try {
-const candles = await getCandlesWithCache(client, symbol, tf, mode, false, cacheTTL);
+const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
 if (Array.isArray(candles) && candles.length > 0) candlesMap[tfKey] = candles;
 } catch (err) { console.error(`❌ ${tfKey}:`, err.message); }
 })
@@ -740,34 +727,30 @@ consolidated.simpleMajority.signal = 'HOLD';
 consolidated.signal = 'HOLD';
 consolidated.confidence = Math.min(consolidated.confidence, 0.3);
 }
-  // ── PREÇO DE ABERTURA DO TF PRIMÁRIO DO MODO ──────────────────────────────
-const PRIMARY_TF_OPEN_MAP = { 
-  'SNIPER':   'M1', 
-  'CAÇADOR':  'M5', 
-  'PESCADOR': 'M15' 
-};
-const primaryOpenTf = PRIMARY_TF_OPEN_MAP[mode];
-const primaryCandles = candlesMap[primaryOpenTf];
+ // ── 7. Preços: ABERTURA (fixo) + ATUAL (tick) para cada modo ──────────────
+const PRIMARY_TF_MAP = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+const primaryTf = PRIMARY_TF_MAP[mode] || 'M5';
+
+// 7a. Preço de abertura do candle atual (FIXO durante o período)
+const primaryCandles = candlesMap[primaryTf];
 const currentOpenCandle = primaryCandles?.at(-1);
 const candleOpenPrice = currentOpenCandle?.open ?? null;
+const primaryOpenTf = primaryTf;
 
-console.log(`🕯️  Open do ${primaryOpenTf} atual: ${candleOpenPrice}`);
-
-// ── 7. Preço: Tick = preço corrente (onde está agora)
+// 7b. Preço atual (tick) para cálculos e diferença
 const tickResult = await tickPromise;
-let currentPrice = 0, priceSource = 'unknown';
+let currentPrice = tickResult;
+let priceSource = 'tick';
 
-if (tickResult) {
-  currentPrice = tickResult; 
-  priceSource = 'tick';
-} else {
-  for (const tf of ['M1', 'M5', 'M15', 'H1', 'H4']) {
+if (!currentPrice) {
+  // Fallback: usa o preço do último candle do TF primário
+  for (const tf of [primaryTf, 'M1', 'M5', 'M15', 'H1', 'H4']) {
     const p = mtfManager.timeframes[tf]?.analysis?.preco_atual;
     if (p) { currentPrice = p; priceSource = tf; break; }
   }
 }
 
-// ─── NOVO: diferença entre open do candle e preço atual ─────────────────────
+// 7c. Diferença entre o preço atual e a abertura do candle
 const priceMovedFromOpen = (candleOpenPrice && currentPrice)
   ? parseFloat((currentPrice - candleOpenPrice).toFixed(5))
   : null;
@@ -776,10 +759,7 @@ const priceMovedDirection = priceMovedFromOpen !== null
   ? (priceMovedFromOpen > 0 ? 'SUBIU' : priceMovedFromOpen < 0 ? 'CAIU' : 'LATERAL')
   : null;
 
-console.log(
-  `💰 Atual: ${currentPrice} | Open ${primaryOpenTf}: ${candleOpenPrice} ` +
-  `| Movimento: ${priceMovedFromOpen > 0 ? '+' : ''}${priceMovedFromOpen} (${priceMovedDirection})`
-);
+console.log(`🕯️  Open ${primaryTf}: ${candleOpenPrice} | 💰 Atual: ${currentPrice} | ${priceMovedDirection} ${priceMovedFromOpen}`);
 
 // ═══════════════════════════════════════════════════════════════
 // FIX: Penalização por "Perdendo Força" — agora proporcional e
