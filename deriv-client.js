@@ -14,18 +14,21 @@ class DerivClient extends EventEmitter {
         this.pendingRequests = new Map();
         this.pingInterval = null;
         this.reconnectAttempts = 0;
-        this.maxReconnectDelay = 60000; // máximo 60s entre tentativas
+        this.maxReconnectDelay = 60000;
         this.reconnectDelay = 1000;
         this.connecting = false;
-
-        // ✅ FIX BUG 1: Flag para cancelar reconexão interna quando o servidor
-        // abandona este cliente e cria um novo. Sem isto, o cliente antigo
-        // continuava a reconectar em paralelo → duas conexões WS simultâneas
-        // → rate limiting da Deriv → timeouts de 30s.
         this._shouldReconnect = true;
 
         // Map de listeners para ticks (usado por getCurrentPrice no server.js)
         this._tickListeners = new Map();
+
+        // ✅ [NOVO] Último tick recebido por símbolo — para consulta rápida sem novo pedido WS
+        this._lastTicksBySymbol = new Map();
+
+        // ✅ [NOVO] Limpeza periódica de listeners antigos (memory leak protection)
+        this._listenerCleanupInterval = setInterval(() => {
+            this._cleanupOldTickListeners(30000);
+        }, 30000);
     }
 
     connect() {
@@ -99,10 +102,7 @@ class DerivClient extends EventEmitter {
         });
     }
 
-    // Reconexão infinita com backoff exponencial até 60s (nunca desiste)
     _reconnect() {
-        // ✅ FIX BUG 1: Se o servidor chamou disconnect(), não reconectar.
-        // Evita ter dois DerivClients activos em simultâneo.
         if (!this._shouldReconnect) {
             console.log('🛑 _reconnect() cancelado (cliente abandonado pelo servidor)');
             return;
@@ -116,17 +116,13 @@ class DerivClient extends EventEmitter {
         console.log(`🔄 Reconectando em ${delay}ms (tentativa ${this.reconnectAttempts})`);
 
         setTimeout(() => {
-            // Verificar novamente antes de reconectar (pode ter sido desligado
-            // durante o delay do setTimeout)
             if (!this._shouldReconnect) return;
             this.connect().catch(err => {
                 console.error('❌ Falha na reconexão:', err.message);
-                // _reconnect() será chamado novamente pelo evento 'close'
             });
         }, delay);
     }
 
-    // Rejeita todos os pedidos pendentes quando o WS fecha
     _rejectAllPending(reason) {
         if (this.pendingRequests.size > 0) {
             console.log(`⚠️ Rejeitando ${this.pendingRequests.size} pedidos pendentes: ${reason}`);
@@ -139,13 +135,6 @@ class DerivClient extends EventEmitter {
     }
 
     _handleMessage(msg) {
-        // ════════════════════════════════════════════════════════════════
-        // ✅ BUG CRÍTICO CORRIGIDO:
-        // O código anterior fazia return após registar this.authorized = true,
-        // sem nunca resolver a Promise armazenada em pendingRequests.
-        // Isso fazia com que authorize() SEMPRE esperasse 30s e falhasse
-        // com "Timeout na autorização", mesmo o WS estando conectado.
-        // ════════════════════════════════════════════════════════════════
         if (msg.msg_type === 'authorize') {
             if (!msg.error) {
                 this.authorized = true;
@@ -155,7 +144,6 @@ class DerivClient extends EventEmitter {
                 this.authorized = false;
             }
 
-            // ✅ AGORA resolve/rejeita a Promise corretamente
             const reqId = msg.echo_req?.req_id;
             if (reqId && this.pendingRequests.has(reqId)) {
                 const { resolve, reject, timeout } = this.pendingRequests.get(reqId);
@@ -174,10 +162,33 @@ class DerivClient extends EventEmitter {
             return;
         }
 
-        // Distribui ticks para os listeners do getCurrentPrice
+        // ✅ [ATUALIZADO] Ticks: guarda no histórico antes de broadcast
         if (msg.msg_type === 'tick' && msg.tick) {
+            const tick = msg.tick;
+            const symbol = tick.symbol;
+            const enrichedTick = {
+                quote: tick.quote,
+                epoch: tick.epoch || Math.floor(Date.now() / 1000),
+                receivedAt: Date.now(),
+                id: tick.id || null
+            };
+
+            // Guarda como último tick conhecido deste símbolo
+            if (symbol) {
+                this._lastTicksBySymbol.set(symbol, enrichedTick);
+            }
+
+            // Broadcast para todos os listeners ativos
+            let deliveredCount = 0;
             for (const [, handler] of this._tickListeners) {
-                try { handler(msg); } catch (e) { /* ignora erros no handler */ }
+                try { 
+                    handler({ tick: enrichedTick, msg_type: 'tick' }); 
+                    deliveredCount++;
+                } catch (e) { /* ignora erros no handler */ }
+            }
+            if (deliveredCount === 0) {
+                // Ninguém estava à espera — log silencioso para debug
+                // console.log(`📡 Tick ${symbol}=${enrichedTick.quote} (sem listeners ativos)`);
             }
             return;
         }
@@ -241,10 +252,6 @@ class DerivClient extends EventEmitter {
             };
             const reqId = req.req_id;
 
-            // ✅ FIX BUG 3: Timeout reduzido de 30000ms para 12000ms.
-            // Com 30s, qualquer WS degradado bloqueava toda a análise durante
-            // meio minuto. 12s é suficiente para a Deriv responder em condições
-            // normais e falha rápido quando há problemas.
             const timeout = setTimeout(() => {
                 this.pendingRequests.delete(reqId);
                 reject(new Error(`Timeout na requisição de candles (${symbol}, ${granularity}s)`));
@@ -267,16 +274,46 @@ class DerivClient extends EventEmitter {
         });
     }
 
-    // addListener e removeListener para ticks (usado por getCurrentPrice no server.js)
+    // ✅ [NOVO] Obtém o último tick conhecido de um símbolo sem fazer novo pedido WS
+    getLastTick(symbol) {
+        const tick = this._lastTicksBySymbol.get(symbol);
+        if (!tick) return null;
+        const ageMs = Date.now() - tick.receivedAt;
+        return { ...tick, ageMs };
+    }
+
+    // ✅ [NOVO] Verifica se há um tick fresco (dentro de maxAgeMs) para o símbolo
+    hasFreshTick(symbol, maxAgeMs = 5000) {
+        const tick = this._lastTicksBySymbol.get(symbol);
+        if (!tick) return false;
+        return (Date.now() - tick.receivedAt) < maxAgeMs;
+    }
+
     addListener(reqId, handler) {
+        // ✅ [NOVO] Adiciona timestamp para permitir limpeza automática
         this._tickListeners.set(reqId, handler);
+        handler._addedAt = Date.now();
     }
 
     removeListener(reqId) {
         this._tickListeners.delete(reqId);
     }
 
-    // getConnectionStatus (chamado em /api/connection-status no server.js)
+    // ✅ [NOVO] Remove listeners que não foram removidos manualmente (memory leak protection)
+    _cleanupOldTickListeners(maxAgeMs = 30000) {
+        const now = Date.now();
+        let removed = 0;
+        for (const [reqId, handler] of this._tickListeners) {
+            if (handler._addedAt && (now - handler._addedAt) > maxAgeMs) {
+                this._tickListeners.delete(reqId);
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            console.log(`🧹 Limpeza automática: ${removed} tick listener(s) antigo(s) removido(s)`);
+        }
+    }
+
     getConnectionStatus() {
         const wsStateMap = { 0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED' };
         return {
@@ -290,13 +327,14 @@ class DerivClient extends EventEmitter {
             reconnectAttempts: this.reconnectAttempts,
             pendingRequests: this.pendingRequests.size,
             tickListeners: this._tickListeners.size,
+            lastTickSymbols: Array.from(this._lastTicksBySymbol.keys()),
             shouldReconnect: this._shouldReconnect,
             uptime: Math.floor(process.uptime())
         };
     }
 
     startPing() {
-        this.stopPing(); // garante que não há intervalos duplicados
+        this.stopPing();
         this.pingInterval = setInterval(() => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 this.ws.send(JSON.stringify({ ping: 1, req_id: this.reqId++ }));
@@ -312,11 +350,17 @@ class DerivClient extends EventEmitter {
     }
 
     disconnect() {
-        // ✅ FIX BUG 1: Sinaliza que este cliente não deve reconectar.
-        // Isto impede que _reconnect() crie uma nova ligação depois de
-        // o servidor já ter criado um DerivClient de substituição.
         this._shouldReconnect = false;
         this.stopPing();
+
+        // ✅ [NOVO] Limpa intervalo de cleanup e listeners pendentes
+        if (this._listenerCleanupInterval) {
+            clearInterval(this._listenerCleanupInterval);
+            this._listenerCleanupInterval = null;
+        }
+        this._tickListeners.clear();
+        this._lastTicksBySymbol.clear();
+
         this._rejectAllPending('Desconexão manual');
         if (this.ws) {
             this.ws.close();
