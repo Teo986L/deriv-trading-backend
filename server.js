@@ -9,6 +9,8 @@ const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
 const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
 const TraderBotAnalise = require('./analyzers/trader-bot-analyzer');
+const CandleTradeAnalyzer = require('./trade-analyzer');
+const tradeAnalyzer = new CandleTradeAnalyzer(0.002, 3); // 0.2% margem, 3x risco
 const { API_TOKEN, CANDLE_CLOSE_TOLERANCE } = require('./config'); // [RETIFICADO] Removido SMOOTHING (não usado)
 const { detectLiquiditySweepRobusto, calculateATR: calcularATRLiquidity } = require('./analyzers/liquidity-hunter-robusto');
 
@@ -611,6 +613,30 @@ function detectTipoAtivo(symbol) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ROTA PRINCIPAL — /api/analyze
 // ═══════════════════════════════════════════════════════════════════════════════
+function calcularStopTakePorModo(candlesMap, mode, timing) {
+    const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+    const primaryTf = PRIMARY_TF_BY_MODE[mode];
+    if (!primaryTf || !timing || !timing.permitido) return null;
+
+    const candles = candlesMap[primaryTf];
+    if (!candles || candles.length === 0) return null;
+
+    const ultimoCandle = candles[candles.length - 1];
+    // Garantir valores numéricos
+    ultimoCandle.open = parseFloat(ultimoCandle.open);
+    ultimoCandle.high = parseFloat(ultimoCandle.high);
+    ultimoCandle.low = parseFloat(ultimoCandle.low);
+    ultimoCandle.close = parseFloat(ultimoCandle.close);
+
+    const sinalTiming = timing.sinal;   // 'CALL' ou 'PUT'
+
+    if (sinalTiming === 'CALL') {
+        return tradeAnalyzer.calcularNiveisLong(ultimoCandle);
+    } else if (sinalTiming === 'PUT') {
+        return tradeAnalyzer.calcularNiveisShort(ultimoCandle);
+    }
+    return null;
+}
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
 
@@ -893,7 +919,15 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     } else if (hasTfDivergenceForLiquidity && liquidityResult.sweepDetected) {
         console.log(`🔒 Liquidez detectada mas TFs divergem - mantendo sinal`);
     }
+    // Obter o timing correspondente ao modo atual
+    const modeTiming = (() => {
+        if (mode === 'SNIPER') return m1Timing;
+        if (mode === 'CAÇADOR') return m5Timing;
+        if (mode === 'PESCADOR') return m15Timing;
+        return null;
+    })();
 
+    const stopTakeLevels = calcularStopTakePorModo(candlesMap, mode, modeTiming);
     const { analiseRefinada, validacaoRisco } = await analiseRefinadaPromise;
 
     const responseTimeframes = {};
@@ -943,10 +977,21 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         callCount: agreement.callCount, putCount: agreement.putCount,
         totalTimeframes: agreement.totalTimeframes
       },
-      suggestion: {
-        action: suggestion.action, reason: suggestion.reason,
-        entry: suggestion.entry, stopLoss: suggestion.stopLoss, takeProfit: suggestion.takeProfit
-      },
+      suggestion: stopTakeLevels
+        ? {
+            action: 'ENTRADA',
+            reason: `Stop e Take calculados para o modo ${mode}`,
+            entry: stopTakeLevels.precoEntrada,
+            stopLoss: stopTakeLevels.stopLoss,
+            takeProfit: stopTakeLevels.takeProfit
+          }
+        : {
+            action: suggestion.action,
+            reason: suggestion.reason,
+            entry: suggestion.entry,
+            stopLoss: suggestion.stopLoss,
+            takeProfit: suggestion.takeProfit
+          },
       timeframes: responseTimeframes,
       refined_analysis: analiseRefinada,
       risk_validation: validacaoRisco,
