@@ -3,25 +3,27 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { createClient } = require('redis');
-const { randomUUID } = require('crypto');
+const { randomUUID } = require('crypto'); // [RETIFICADO] Movido para o topo
 const DerivClient = require('./deriv-client');
 const { SistemaAnaliseInteligente } = require('./analyzers/sistema-analise');
 const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
 const TraderBotAnalise = require('./analyzers/trader-bot-analyzer');
 const CandleTradeAnalyzer = require('./trade-analyzer');
-const tradeAnalyzer = new CandleTradeAnalyzer(0.002, 3);
-const { API_TOKEN, CANDLE_CLOSE_TOLERANCE } = require('./config');
+const tradeAnalyzer = new CandleTradeAnalyzer(0.002, 3); // 0.2% margem, 3x risco
+const { API_TOKEN, CANDLE_CLOSE_TOLERANCE } = require('./config'); // [RETIFICADO] Removido SMOOTHING (não usado)
 const { detectLiquiditySweepRobusto, calculateATR: calcularATRLiquidity } = require('./analyzers/liquidity-hunter-robusto');
 
 const app = express();
 
+// [RETIFICADO] Encerramento gracioso em vez de manter vivo indefinidamente
 let isShuttingDown = false;
 function gracefulShutdown(signal, err) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   console.error(`❌ ${signal}:`, err?.message || err);
   if (err?.stack) console.error(err.stack);
+  // Dá tempo a pedidos em curso terminarem (2s), depois encerra
   setTimeout(() => process.exit(1), 2000);
 }
 process.on('uncaughtException', (err) => gracefulShutdown('uncaughtException', err));
@@ -57,7 +59,7 @@ app.set('trust proxy', 1);
 
 // ========== CACHE EM MEMÓRIA COM LIMITE ANTI-OOM ==========
 const memoryCache = new Map();
-const MAX_MEMORY_CACHE_SIZE = 500;
+const MAX_MEMORY_CACHE_SIZE = 500; // [RETIFICADO] Limite máximo de entradas
 
 function getFromMemoryCache(key) {
     const entry = memoryCache.get(key);
@@ -70,6 +72,7 @@ function getFromMemoryCache(key) {
 }
 
 function setToMemoryCache(key, data, ttlSeconds) {
+    // [RETIFICADO] LRU simples: se cheio, remove a entrada mais antiga
     if (memoryCache.size >= MAX_MEMORY_CACHE_SIZE && !memoryCache.has(key)) {
         const firstKey = memoryCache.keys().next().value;
         memoryCache.delete(firstKey);
@@ -80,6 +83,7 @@ function setToMemoryCache(key, data, ttlSeconds) {
     });
 }
 
+// Limpeza periódica
 setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of memoryCache) {
@@ -87,18 +91,7 @@ setInterval(() => {
     }
 }, 60000);
 
-// ========== TICK ANTI-CACHE: RASTREIO DO ÚLTIMO TICK POR SÍMBOLO ==========
-// [NOVO] Garante que não reutilizamos o mesmo tick entre cliques consecutivos
-const lastTickBySymbol = new Map();
-
-function getLastTickInfo(symbol) {
-  return lastTickBySymbol.get(symbol) || null;
-}
-
-function setLastTickInfo(symbol, quote, epoch) {
-  lastTickBySymbol.set(symbol, { quote, epoch, receivedAt: Date.now() });
-}
-
+// ========== CONFIGURAÇÃO DO REDIS (OPCIONAL) ==========
 let redisClient = null;
 
 const CANDLE_CLOSE_MARGIN = 5;
@@ -140,6 +133,7 @@ const TRADING_MODES = {
   'PESCADOR': { timeframes: ['M15', 'H1', 'H4', 'H24'],   description: 'Grandes movimentos de horas a dias' }
 };
 
+// [RETIFICADO] Corrigida inconsistência de string: CAÇADOR com cedilha
 function getATRTimeframeByMode(mode) {
   const map = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
   return map[mode] || 'M5';
@@ -167,6 +161,7 @@ async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false,
   const cacheKey = `candles:${symbol}:${tf.key}`;
   const ttl = ttlOverride !== null ? ttlOverride : getTTLAlignedToCandle(tf.seconds);
 
+  // 1. Tenta cache em memória
   if (!forceFresh) {
     const memCached = getFromMemoryCache(cacheKey);
     if (memCached) {
@@ -177,12 +172,15 @@ async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false,
     }
   }
 
+  // 2. Tenta Redis
   if (redisClient && redisClient.isReady && !forceFresh) {
     try {
       const cached = await redisClient.get(cacheKey);
       if (cached) {
         const remainingTTL = await redisClient.ttl(cacheKey);
         console.log(`✅ Cache Redis: ${cacheKey} (TTL: ${remainingTTL}s)`);
+
+        // [RETIFICADO] Proteção contra cache corrompido no Redis
         let candles;
         try {
           candles = JSON.parse(cached);
@@ -191,7 +189,9 @@ async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false,
           await redisClient.del(cacheKey);
           return null;
         }
+
         setToMemoryCache(cacheKey, candles, remainingTTL > 0 ? remainingTTL : ttl);
+
         if (remainingTTL <= CANDLE_CLOSE_MARGIN) {
           setImmediate(async () => {
             try {
@@ -209,15 +209,19 @@ async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false,
     } catch (err) { console.error(`❌ Erro Redis ${cacheKey}:`, err.message); }
   }
 
+  // 3. Evita requisições duplicadas em voo
   if (inFlightRequests.has(cacheKey)) return inFlightRequests.get(cacheKey);
 
+  // 4. Fetch fresco da Deriv
   const fetchPromise = (async () => {
     try {
       console.log(`🔄 Buscando ${tf.key} (${tf.candleCount} candles)`);
       const candles = await client.getCandles(symbol, tf.candleCount, tf.seconds);
       if (!Array.isArray(candles)) return candles;
       console.log(`📊 ${tf.key}: ${candles.length} candles`);
+
       setToMemoryCache(cacheKey, candles, ttl);
+
       if (redisClient && redisClient.isReady) {
         redisClient.setEx(cacheKey, ttl, JSON.stringify(candles))
           .catch(err => console.error(`❌ Erro salvando Redis: ${err.message}`));
@@ -242,7 +246,7 @@ const analyzeLimiter = rateLimit({
 const adminLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
-  keyGenerator: (req) => req.ip,
+  keyGenerator: (req) => req.ip, // [RETIFICADO] Explícito
   message: { error: 'Limite de geração de tokens excedido.' }
 });
 
@@ -269,23 +273,35 @@ function authenticateToken(req, res, next) {
 
 let derivClient = null;
 let derivConnectionPromise = null;
-let isDerivConnecting = false;
-const derivWaiters = [];
+let isDerivConnecting = false; // [RETIFICADO] Lock para evitar race condition
+const derivWaiters = [];       // [RETIFICADO] Fila de espera
 
+// ========== FIX 2: RECONEXÃO AUTOMÁTICA DO DERIV WEBSOCKET (COM LOCK) ==========
 async function getDerivClient() {
+  // Se já existe e está conectado (readyState 1 = OPEN), devolve direto
   if (derivClient && derivClient.ws?.readyState === 1) return derivClient;
+
+  // [RETIFICADO] Se já está em processo de conexão, entra na fila
   if (isDerivConnecting) {
     return new Promise((resolve, reject) => {
       derivWaiters.push({ resolve, reject });
     });
   }
+
   isDerivConnecting = true;
+
   try {
+    // Desliga cliente antigo de forma segura
     if (derivClient) {
-      try { derivClient.disconnect(); } catch (e) { console.error('⚠️ Erro ao desligar cliente Deriv antigo:', e.message); }
+      try {
+        derivClient.disconnect();
+      } catch (e) {
+        console.error('⚠️ Erro ao desligar cliente Deriv antigo:', e.message);
+      }
       derivClient = null;
     }
     derivConnectionPromise = null;
+
     derivClient = new DerivClient(API_TOKEN);
     derivConnectionPromise = derivClient.connect()
       .then(() => {
@@ -298,7 +314,9 @@ async function getDerivClient() {
         derivClient = null;
         throw err;
       });
+
     const result = await derivConnectionPromise;
+    // [RETIFICADO] Resolve todos os que estavam à espera
     derivWaiters.forEach(w => w.resolve(result));
     return result;
   } catch (err) {
@@ -306,13 +324,15 @@ async function getDerivClient() {
     throw err;
   } finally {
     isDerivConnecting = false;
-    derivWaiters.length = 0;
+    derivWaiters.length = 0; // limpa fila
   }
 }
 
+// Vigilante de reconexão automática a cada 4 minutos
 setInterval(async () => {
   try {
     const ws = derivClient?.ws;
+    // [RETIFICADO] Só reconecta se não estiver conectado E não estiver a conectar
     const needsReconnect = !ws || (ws.readyState !== 1 && ws.readyState !== 0);
     if (needsReconnect && !isDerivConnecting) {
       console.log('🔄 [Watchdog] Reconectando Deriv...');
@@ -329,11 +349,13 @@ setInterval(async () => {
   }
 }, 4 * 60 * 1000);
 
+// [RETIFICADO] Counter global para IDs únicos de tick
 let tickRequestCounter = 0;
 
-// ========== [ATUALIZADO] getCurrentPrice: SEMPRE FRESCO, SEM CACHE ==========
-async function getCurrentPrice(client, symbol, maxAgeMs = 5000) {
+// ── tick com timeout reduzido (350ms) ──
+async function getCurrentPrice(client, symbol) {
   return new Promise((resolve) => {
+    // [RETIFICADO] Verifica capacidade do cliente antes de criar handlers
     if (typeof client.addListener !== 'function' || typeof client.removeListener !== 'function') {
       resolve(null);
       return;
@@ -343,47 +365,23 @@ async function getCurrentPrice(client, symbol, maxAgeMs = 5000) {
       return;
     }
 
-    const reqId = `price_${Date.now()}_${++tickRequestCounter}_${Math.random().toString(36).slice(2, 7)}`;
-    let resolved = false;
+    const reqId = `price_${Date.now()}_${++tickRequestCounter}`;
 
     const handler = (response) => {
-      if (resolved) return;
       if (response.error) {
-        resolved = true;
         clearTimeout(timeout);
         client.removeListener(reqId, handler);
         resolve(null);
       } else if (response.tick && response.tick.symbol === symbol) {
-        const tick = response.tick;
-        const quote = tick.quote;
-        const epoch = tick.epoch || Math.floor(Date.now() / 1000);
-
-        // [NOVO] Anti-cache: verifica se é o mesmo tick do clique anterior
-        const lastTick = getLastTickInfo(symbol);
-        const isStale = lastTick && 
-          (lastTick.quote === quote || lastTick.epoch === epoch) && 
-          (Date.now() - lastTick.receivedAt) < maxAgeMs;
-
-        if (isStale) {
-          console.log(`⚠️ Tick ${symbol} idêntico ao anterior (quote=${quote}, epoch=${epoch}) — considerado stale`);
-          // Não resolve ainda, espera pelo próximo tick ou timeout
-          return; 
-        }
-
-        resolved = true;
         clearTimeout(timeout);
         client.removeListener(reqId, handler);
-        setLastTickInfo(symbol, quote, epoch);
-        resolve({ quote, epoch, source: 'tick', reqId });
+        resolve(response.tick.quote);
       }
     };
 
     const timeout = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        client.removeListener(reqId, handler);
-        resolve(null);
-      }
+      client.removeListener(reqId, handler);
+      resolve(null);
     }, 350);
 
     client.addListener(reqId, handler);
@@ -391,38 +389,7 @@ async function getCurrentPrice(client, symbol, maxAgeMs = 5000) {
   });
 }
 
-// ========== [NOVO] Fallback imediato para preço fresco via candles ==========
-async function getCurrentPriceWithFallback(client, symbol, candlesMap, mtfManager) {
-  // 1. Tenta tick fresco primeiro
-  const tickResult = await getCurrentPrice(client, symbol);
-  if (tickResult && tickResult.quote) {
-    return { currentPrice: tickResult.quote, priceSource: 'tick', tickEpoch: tickResult.epoch };
-  }
-
-  // 2. Fallback: último close do M1 fresco
-  try {
-    const freshM1 = await client.getCandles(symbol, 1, 60);
-    if (freshM1 && freshM1.length > 0) {
-      const price = parseFloat(freshM1[freshM1.length - 1].close);
-      console.log(`⚠️ Tick falhou, usando M1 fresco: ${price}`);
-      return { currentPrice: price, priceSource: 'fallback_freshM1', tickEpoch: null };
-    }
-  } catch (err) {
-    console.error('❌ Fallback M1 falhou:', err.message);
-  }
-
-  // 3. Fallback: candles já carregados no mapa
-  for (const tf of ['M1', 'M5', 'M15', 'H1', 'H4']) {
-    const p = mtfManager?.timeframes?.[tf]?.analysis?.preco_atual;
-    if (p) {
-      return { currentPrice: p, priceSource: `fallback_${tf}`, tickEpoch: null };
-    }
-  }
-
-  // 4. Último recurso: abertura do candle primário
-  return { currentPrice: null, priceSource: 'unavailable', tickEpoch: null };
-}
-
+// ========== FIX 4: ENDPOINT /health INFORMATIVO ==========
 app.get('/health', (req, res) => {
   const ws = derivClient?.ws;
   const derivStatus = ws?.readyState === 1 ? 'connected' : ws?.readyState === 0 ? 'connecting' : 'disconnected';
@@ -479,6 +446,7 @@ app.post('/api/admin/generate-token', adminLimiter, (req, res) => {
 
 app.post('/api/admin/restart-render', adminLimiter, async (req, res) => {
   try {
+    // [RETIFICADO] Verifica se fetch existe (Node.js 18+)
     if (typeof fetch !== 'function') {
       return res.status(500).json({ success: false, error: 'fetch não disponível (requer Node.js 18+)' });
     }
@@ -500,6 +468,7 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
   res.json(derivClient.getConnectionStatus());
 });
 
+// ========== RSI LIMITS POR TIPO DE ATIVO ==========
 const RSI_LIMITS_BY_ASSET = {
   'forex':           { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 30 },
   'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20 },
@@ -556,6 +525,7 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
   return alerta;
 }
 
+// ── Funções de timing ────────
 function buildTimingResult(analysis, signal, tf, label) {
   if (!analysis) return { permitido: false, motivo: `${label} não disponível`, rsi: null, sinal: null, adx: null, alerta_pullback: null };
 
@@ -622,6 +592,7 @@ function calcularTimingH4(a, s) {
   return { permitido: false, motivo: 'H4 é TF de tendência', rsi: a.rsi || 50, sinal: a.sinal, adx: a.adx || 0, alerta_pullback: gerarAlertaPullback(a.rsi || 50, s, a.tipo_ativo || 'indice_normal', 'H4') };
 }
 
+// ── Detetor de tipo de ativo ─────────
 function detectTipoAtivo(symbol) {
     if (/^WLD/i.test(symbol)) return 'forex';
     if (symbol.startsWith('R_') || symbol.startsWith('1HZ')) return 'volatility_index';
@@ -639,18 +610,26 @@ function detectTipoAtivo(symbol) {
     return 'indice_normal';
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ROTA PRINCIPAL — /api/analyze
+// ═══════════════════════════════════════════════════════════════════════════════
 function calcularStopTakePorModo(candlesMap, mode, timing) {
     const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
     const primaryTf = PRIMARY_TF_BY_MODE[mode];
     if (!primaryTf || !timing || !timing.permitido) return null;
+
     const candles = candlesMap[primaryTf];
     if (!candles || candles.length === 0) return null;
+
     const ultimoCandle = candles[candles.length - 1];
+    // Garantir valores numéricos
     ultimoCandle.open = parseFloat(ultimoCandle.open);
     ultimoCandle.high = parseFloat(ultimoCandle.high);
     ultimoCandle.low = parseFloat(ultimoCandle.low);
     ultimoCandle.close = parseFloat(ultimoCandle.close);
-    const sinalTiming = timing.sinal;
+
+    const sinalTiming = timing.sinal;   // 'CALL' ou 'PUT'
+
     if (sinalTiming === 'CALL') {
         return tradeAnalyzer.calcularNiveisLong(ultimoCandle);
     } else if (sinalTiming === 'PUT') {
@@ -658,16 +637,13 @@ function calcularStopTakePorModo(candlesMap, mode, timing) {
     }
     return null;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// ROTA PRINCIPAL — /api/analyze  [ATUALIZADA: TICK SEMPRE FRESCO]
-// ═══════════════════════════════════════════════════════════════════════════════
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
 
   try {
     const { symbol, mode } = req.body;
 
+    // [RETIFICADO] Validação robusta do símbolo
     if (!symbol || typeof symbol !== 'string' || symbol.length > 20 || !/^[A-Za-z0-9_]+$/.test(symbol)) {
       return res.status(400).json({ error: 'Símbolo inválido ou não permitido' });
     }
@@ -676,6 +652,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     console.log(`\n🎯 ${mode} | ${symbol}`);
 
     const client = await getDerivClient();
+
     const tipoAtivo = detectTipoAtivo(symbol);
     console.log(`🏷️  ${tipoAtivo}`);
 
@@ -688,6 +665,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       if (tipoAtivo === 'criptomoeda') tf.candleCount = 60;
       return tf;
     });
+
+    const tickPromise = getCurrentPrice(client, symbol);
 
     const candlesMap = {};
     await Promise.all(
@@ -769,8 +748,32 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const candleOpenPrice = currentOpenCandle?.open ?? null;
     const primaryOpenTf = primaryTf;
 
-    // ========== [ATUALIZADO] TICK CHAMADO NO MOMENTO DO USO, SEMPRE FRESCO ==========
-    const { currentPrice, priceSource, tickEpoch } = await getCurrentPriceWithFallback(client, symbol, candlesMap, mtfManager);
+    const tickResult = await tickPromise;
+    let currentPrice = tickResult;
+    let priceSource = 'tick';
+
+    if (!currentPrice) {
+      for (const tf of [primaryTf, 'M1', 'M5', 'M15', 'H1', 'H4']) {
+        const p = mtfManager.timeframes[tf]?.analysis?.preco_atual;
+        if (p) { currentPrice = p; priceSource = `fallback_${tf}`; break; }
+      }
+      if (!currentPrice) {
+        try {
+          const freshM1 = await client.getCandles(symbol, 1, 60);
+          if (freshM1 && freshM1.length > 0) {
+            currentPrice = parseFloat(freshM1[freshM1.length - 1].close);
+            priceSource = 'fallback_freshM1';
+            console.log(`⚠️ Tick falhou, usando último M1 fechado: ${currentPrice}`);
+          }
+        } catch (err) {
+          console.error('❌ Fallback M1 falhou:', err.message);
+        }
+      }
+      if (!currentPrice && candleOpenPrice) {
+        currentPrice = candleOpenPrice;
+        priceSource = 'fallback_open';
+      }
+    }
 
     const priceMovedFromOpen = (candleOpenPrice && currentPrice)
       ? parseFloat((currentPrice - candleOpenPrice).toFixed(5))
@@ -780,19 +783,19 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       ? (priceMovedFromOpen > 0 ? 'SUBIU' : priceMovedFromOpen < 0 ? 'CAIU' : 'LATERAL')
       : null;
 
-    console.log(`🕯️  Open ${primaryTf}: ${candleOpenPrice} | 💰 Atual: ${currentPrice} (fonte: ${priceSource}, epoch: ${tickEpoch || 'N/A'}) | ${priceMovedDirection} ${priceMovedFromOpen}`);
+    console.log(`🕯️  Open ${primaryTf}: ${candleOpenPrice} | 💰 Atual: ${currentPrice} | ${priceMovedDirection} ${priceMovedFromOpen}`);
 
     const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
     const modePrimaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
     const allTfsAgree = callCountDiv === modeTimeframes.length || putCountDiv === modeTimeframes.length;
-
+    // Alerta informativo – sem penalizar confiança
     for (const tfKey of modeTimeframes) {
         const phase = mtfManager.timeframes[tfKey]?.analysis?.macd_phase?.name;
         if (phase && phase.includes('PERDENDO FORÇA')) {
             console.warn(`⚠️ Alerta: ${tfKey} com ${phase} — monitorar perda de força`);
         }
     }
-
+    
     let primaryTrendNote = null;
     if (consolidated.signal === 'HOLD') {
         const trendTFMap = { 'SNIPER': 'M15', 'CAÇADOR': 'H1', 'PESCADOR': 'H24' };
@@ -838,9 +841,11 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         const bot = new TraderBotAnalise({ confiancaMinimaOperar: 60, confiancaAlta: 75, adxTendenciaForte: 25, adxSemTendencia: 20 });
         const analise = bot.gerarAnalise(dadosMercado, modeMap[mode] || 'CACADOR');
         const risco   = bot.validarOperacao(analise, req.user?.saldo || 1000, 2);
+
         const direcao   = analise?.sinal?.direcao   ?? 'N/A';
         const confianca = analise?.sinal?.confianca ?? 0;
         console.log(`📊 Refinada: ${direcao} ${confianca}%`);
+
         return { analiseRefinada: analise, validacaoRisco: risco };
       } catch (err) {
         console.error('❌ analiseRefinada:', err.message);
@@ -863,6 +868,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     }
 
     let timingRiskWarning = null;
+
     if (consolidated.signal !== 'HOLD') {
         const modeTimingMap = {
             'SNIPER': m1Timing,
@@ -870,10 +876,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
             'PESCADOR': m15Timing
         };
         const primaryTiming = modeTimingMap[mode];
+
         if (primaryTiming && !primaryTiming.permitido) {
             const previousConf = consolidated.confidence;
             consolidated.confidence = Math.min(consolidated.confidence, 0.35);
             timingRiskWarning = `⛔ ENTRADA DE RISCO — timing do ${primaryTf} não confirma`;
+
             console.log(
                 `⛔ Timing primário (${primaryTf}) NÃO OK → confiança limitada a 35% ` +
                 `(${(previousConf * 100).toFixed(1)}% → ${(consolidated.confidence * 100).toFixed(1)}%)`
@@ -911,7 +919,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     } else if (hasTfDivergenceForLiquidity && liquidityResult.sweepDetected) {
         console.log(`🔒 Liquidez detectada mas TFs divergem - mantendo sinal`);
     }
-
+    // Obter o timing correspondente ao modo atual
     const modeTiming = (() => {
         if (mode === 'SNIPER') return m1Timing;
         if (mode === 'CAÇADOR') return m5Timing;
@@ -945,9 +953,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         simpleMajority: consolidated.simpleMajority,
         timeframesAnalyzed: agreement.totalTimeframes,
         sinal_premium: consolidated.sinal_premium || null,
-        price: currentPrice,
-        priceSource,
-        tickEpoch: tickEpoch || null,
+        price: currentPrice, priceSource,
         candleOpenPrice,
         candleOpenTf: primaryOpenTf,
         priceMovedFromOpen,
@@ -1003,6 +1009,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
   } catch (error) {
     console.error('❌ Erro na análise:', error);
+    // [RETIFICADO] Não expõe stack em produção
     const isDev = process.env.NODE_ENV === 'development';
     res.status(500).json({ error: isDev ? error.message : 'Erro interno no processamento da análise' });
   }
@@ -1036,12 +1043,11 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🔌 FIX: optional chaining em analise.sinal ativo`);
   console.log(`⏱️  FIX: timeout getCandles reduzido para 12s`);
   console.log(`🔒 FIX: Cache Redis com validação JSON e LRU em memória`);
-  console.log(`⚡ FIX 5: TICK SEMPRE FRESCO — anti-cache por epoch/quote + fallback M1`);
-  console.log(`🎯 FIX 6: getCurrentPrice chamado no momento do uso, não no início`);
   try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
   catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
 
+// ========== FIX 3: SELF-PING ANTI-HIBERNAÇÃO ==========
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 setInterval(async () => {
