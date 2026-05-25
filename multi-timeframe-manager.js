@@ -953,11 +953,13 @@ class MultiTimeframeManager {
         console.log(`📊 Histórico ${timeframeKey}: ${taxa}% acertos`);
     }
 
+    // ========== [RETIFICADO] CONSOLIDAR SINAIS COM CONTEXTO DO MODO ==========
+    // Agora diferencia pullback saudável (WEAK_BULL/WEAK_BEAR) de reversão real
+    // e respeita a hierarquia: H4/H1 = tendência | M15 = direção | M5/M1 = timing
     consolidateSignals() {
-        // 🔍 LOG: Sinais ANTES de qualquer modificação
         console.log('🔍 [CONSOLIDATE] ANTES de qualquer modificação:');
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
-            console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
+            console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}, adx=${analysis.adx?.toFixed(1)}`);
         }
         
         let totalWeight = 0;
@@ -975,25 +977,53 @@ class MultiTimeframeManager {
         const pontoFranco = this.detectarPontoFranco();
         const alinhamentoPescador = this.detectarAlinhamentoPescador();
 
-        // 🔍 LOG: Após detectar informações especiais
         console.log('🔍 [CONSOLIDATE] Após detectar informações especiais:');
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
             console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
         }
 
-        // Se for tendência real, logar
         if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
             console.log(`📊 TENDÊNCIA REAL DETECTADA: ${tipoTendencia.direcao} - ${tipoTendencia.alerta}`);
         }
 
+        // [RETIFICADO] Hierarquia de timeframes por função
+        const TF_HIERARQUIA = {
+            'H4': { funcao: 'TENDENCIA', pesoMinimo: 0.3 },
+            'H1': { funcao: 'TENDENCIA', pesoMinimo: 0.25 },
+            'M15': { funcao: 'DIRECAO', pesoMinimo: 0.2 },
+            'M5': { funcao: 'TIMING', pesoMinimo: 0.15 },
+            'M1': { funcao: 'TIMING', pesoMinimo: 0.1 }
+        };
+
+        // [RETIFICADO] Analisar cada TF com contexto da sua função
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
             if (!analysis) continue;
             
             const smoothedSignal = this.getSmoothedSignal(key);
             const signalForWeight = smoothedSignal || analysis.sinal;
+            const faseMACD = analysis.macd_phase?.phase;
+            const funcaoTF = TF_HIERARQUIA[key]?.funcao || 'GERAL';
             
-            // ========== USAR PESO DINÂMICO ==========
+            // ========== [RETIFICADO] Peso dinâmico com contexto ==========
             let weight = this.calcularPesoDinamico(key, analysis);
+            
+            // [RETIFICADO] Ajustar peso baseado na função do TF na hierarquia
+            if (funcaoTF === 'TENDENCIA' && analysis.adx > 25) {
+                weight *= 1.3;  // TFs de tendência com ADX forte têm mais peso
+                console.log(`⚖️ ${key} (TENDÊNCIA) com ADX ${analysis.adx.toFixed(1)} → peso aumentado para ${weight.toFixed(2)}`);
+            }
+            
+            // [RETIFICADO] WEAK_BULL/WEAK_BEAR em TF de timing não matam o sinal
+            // Se o TF de tendência está alinhado, o sinal prevalece
+            if ((faseMACD === 'WEAK_BULL' || faseMACD === 'WEAK_BEAR') && funcaoTF === 'TIMING') {
+                const tfTendencia = Object.entries(this.allAnalyses).find(([k, a]) => 
+                    TF_HIERARQUIA[k]?.funcao === 'TENDENCIA' && a?.sinal === signalForWeight
+                );
+                if (tfTendencia) {
+                    weight *= 0.7;  // Reduz peso mas não zera
+                    console.log(`⚖️ ${key} (TIMING) em WEAK_${faseMACD.includes('BULL')?'BULL':'BEAR'} mas ${tfTendencia[0]} confirma → peso reduzido para ${weight.toFixed(2)}`);
+                }
+            }
             
             // ========== AJUSTAR POR PONTO FRANCO ==========
             if (pontoFranco && key === 'M1') {
@@ -1025,7 +1055,9 @@ class MultiTimeframeManager {
                 putWeight += weight * (analysis.probabilidade || 0.5);
             } else {
                 holdCount++;
-                const holdConfidence = (analysis.probabilidade || 0.5) * 0.3;
+                // [RETIFICADO] HOLD em TF de timing com tendência clara não penaliza tanto
+                const penalidadeHOLD = funcaoTF === 'TIMING' ? 0.5 : 0.3;
+                const holdConfidence = (analysis.probabilidade || 0.5) * penalidadeHOLD;
                 callWeight += weight * holdConfidence * 0.5;
                 putWeight += weight * holdConfidence * 0.5;
             }
@@ -1045,7 +1077,6 @@ class MultiTimeframeManager {
             };
         }
 
-        // 🔍 LOG: Após o loop de processamento
         console.log('🔍 [CONSOLIDATE] Após loop de processamento (antes de calcular primarySignal):');
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
             console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
@@ -1093,35 +1124,49 @@ class MultiTimeframeManager {
             confidence = totalConfidence / (timeframesCount * 100) * 0.5;
         }
 
-        // Se for tendência real, aumentar confiança
+        // [RETIFICADO] Se for tendência real, aumentar confiança (mas não demais)
         if (tipoTendencia?.tipo === 'TENDENCIA_REAL') {
-            confidence = Math.min(0.9, confidence * 1.2);
+            confidence = Math.min(0.85, confidence * 1.15);  // [RETIFICADO] Cap a 85%, multiplicador 1.15
         }
 
         const divergencias = this.detectarDivergencias();
         const timeframeDominante = this.getTimeframeDominante();
 
+        // [RETIFICADO] Divergências de TFs de timing com TFs de tendência alinhados são menos severas
+        let severidadeAjustada = divergencias;
         if (divergencias.length > 0) {
-            const severidadeMedia = divergencias.reduce((acc, d) => acc + d.severidade, 0) / divergencias.length;
-            confidence *= (1 - (severidadeMedia / 200));
+            const temTendenciaForte = Object.entries(this.allAnalyses).some(([k, a]) => 
+                TF_HIERARQUIA[k]?.funcao === 'TENDENCIA' && a?.adx > 25 && a?.sinal === primarySignal
+            );
+            if (temTendenciaForte) {
+                // Reduz severidade de divergências em TFs menores
+                severidadeAjustada = divergencias.map(d => ({
+                    ...d,
+                    severidade: d.severidade * 0.6  // Reduz impacto em 40%
+                }));
+                console.log(`⚖️ Divergências reduzidas: TFs de tendência forte alinhados`);
+            }
+        }
+
+        if (severidadeAjustada.length > 0) {
+            const severidadeMedia = severidadeAjustada.reduce((acc, d) => acc + d.severidade, 0) / severidadeAjustada.length;
+            confidence *= (1 - (severidadeMedia / 300));  // [RETIFICADO] Divisor 300 em vez de 200 (menos penalização)
         }
 
         const majorityRatio = Math.max(callCount, putCount) / (callCount + putCount + holdCount);
         confidence = confidence * (0.8 + 0.2 * majorityRatio);
         
-        // 🔥 APLICAR VOLATILITY BOOST
+        // APLICAR VOLATILITY BOOST
         const volatilityBoost = this.calcularVolatilityBoost();
         confidence = confidence * volatilityBoost;
         
         confidence = Math.min(0.95, Math.max(0.05, confidence));
 
-        // 🔍 LOG: Antes do return
         console.log('🔍 [CONSOLIDATE] ANTES DO RETURN (estado final):');
         for (const [key, analysis] of Object.entries(this.allAnalyses)) {
             console.log(`   ${key}: sinal=${analysis.sinal}, fase=${analysis.macd_phase?.phase}`);
         }
 
-        // ========== ADICIONAR INFORMAÇÕES ESPECIAIS AO RESULTADO ==========
         this.consolidatedSignal = {
             signal: primarySignal,
             confidence: confidence,
@@ -1139,7 +1184,6 @@ class MultiTimeframeManager {
             timeframeDominante: timeframeDominante,
             recomendacao: divergencias.length > 1 ? 'AGUARDAR' : 
                           (confidence > 0.7 ? primarySignal : 'CAUTELA'),
-            // ========== NOVAS INFORMAÇÕES ==========
             tipo_tendencia: tipoTendencia,
             ciclo_completo: cicloCompleto,
             ponto_franco: pontoFranco,
