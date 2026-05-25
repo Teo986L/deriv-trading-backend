@@ -28,12 +28,12 @@ class MacdPhaseAnalyzer {
             },
             WEAK_BULL: { 
                 name: 'ALTA PERDENDO FORÇA', 
-                confidence: 0.45, 
-                action: 'HOLD', 
+                confidence: 0.55,        // [RETIFICADO] 0.45 → 0.55 (não é tão fraco)
+                action: 'CALL',         // [RETIFICADO] 'HOLD' → 'CALL' (mantém direção, alerta fraqueza)
                 description: 'MACD e Sinal positivos, Histograma negativo',
                 icon: '⚠️',
                 color: '#ffc107',
-                recomendacao: '⚠️ Alta perdendo força - Aguardar ou realizar lucro'
+                recomendacao: '⚠️ Alta perdendo força - Reduzir stake ou aguardar confirmação'
             },
             CROSS_BEAR: { 
                 name: 'CRUZAMENTO BAIXA', 
@@ -64,12 +64,12 @@ class MacdPhaseAnalyzer {
             },
             WEAK_BEAR: { 
                 name: 'BAIXA PERDENDO FORÇA', 
-                confidence: 0.45, 
-                action: 'HOLD', 
+                confidence: 0.55,        // [RETIFICADO] 0.45 → 0.55
+                action: 'PUT',           // [RETIFICADO] 'HOLD' → 'PUT'
                 description: 'MACD e Sinal negativos, Histograma positivo',
                 icon: '⚠️',
                 color: '#ffc107',
-                recomendacao: '⚠️ Baixa perdendo força - Aguardar ou realizar lucro'
+                recomendacao: '⚠️ Baixa perdendo força - Reduzir stake ou aguardar confirmação'
             },
             NEUTRAL: { 
                 name: 'NEUTRO', 
@@ -99,7 +99,6 @@ class MacdPhaseAnalyzer {
 
         const { macd, sinal, histograma } = macdData;
         
-        // Tolerância para considerar zero
         const tolerance = 0.001;
         const macdPos = macd > tolerance;
         const macdNeg = macd < -tolerance;
@@ -111,68 +110,33 @@ class MacdPhaseAnalyzer {
         let phase = 'NEUTRAL';
         let status = {};
 
-        // FASE 1: ALTA FORTE 📈
         if (macdPos && sinalPos && histPos) {
             phase = 'STRONG_BULL';
-            status = {
-                macd: '✅ POSITIVO',
-                sinal: '✅ POSITIVO',
-                histograma: '✅ POSITIVO'
-            };
+            status = { macd: '✅ POSITIVO', sinal: '✅ POSITIVO', histograma: '✅ POSITIVO' };
         }
-        // FASE 2: ALTA PERDENDO FORÇA ⚠️
         else if (macdPos && sinalPos && histNeg) {
-            phase = 'WEAK_BULL';
-            status = {
-                macd: '✅ POSITIVO',
-                sinal: '✅ POSITIVO',
-                histograma: '❌ NEGATIVO'
-            };
+            phase = 'WEAK_BULL';  // [RETIFICADO] Mantém CALL, não força HOLD
+            status = { macd: '✅ POSITIVO', sinal: '✅ POSITIVO', histograma: '❌ NEGATIVO' };
         }
-        // FASE 3: CRUZAMENTO DE BAIXA 🔻
         else if (macdNeg && sinalPos && histNeg) {
             phase = 'CROSS_BEAR';
-            status = {
-                macd: '❌ NEGATIVO',
-                sinal: '✅ POSITIVO',
-                histograma: '❌ NEGATIVO'
-            };
+            status = { macd: '❌ NEGATIVO', sinal: '✅ POSITIVO', histograma: '❌ NEGATIVO' };
         }
-        // FASE 4: BAIXA FORTE 📉
         else if (macdNeg && sinalNeg && histNeg) {
             phase = 'STRONG_BEAR';
-            status = {
-                macd: '❌ NEGATIVO',
-                sinal: '❌ NEGATIVO',
-                histograma: '❌ NEGATIVO'
-            };
+            status = { macd: '❌ NEGATIVO', sinal: '❌ NEGATIVO', histograma: '❌ NEGATIVO' };
         }
-        // FASE 5: CRUZAMENTO DE ALTA 🔺
         else if (macdPos && sinalNeg && histPos) {
             phase = 'CROSS_BULL';
-            status = {
-                macd: '✅ POSITIVO',
-                sinal: '❌ NEGATIVO',
-                histograma: '✅ POSITIVO'
-            };
+            status = { macd: '✅ POSITIVO', sinal: '❌ NEGATIVO', histograma: '✅ POSITIVO' };
         }
-        // FASE 6: BAIXA PERDENDO FORÇA ⚠️
         else if (macdNeg && sinalNeg && histPos) {
-            phase = 'WEAK_BEAR';
-            status = {
-                macd: '❌ NEGATIVO',
-                sinal: '❌ NEGATIVO',
-                histograma: '✅ POSITIVO'
-            };
+            phase = 'WEAK_BEAR';  // [RETIFICADO] Mantém PUT, não força HOLD
+            status = { macd: '❌ NEGATIVO', sinal: '❌ NEGATIVO', histograma: '✅ POSITIVO' };
         }
-        // FASE 7: NEUTRO
         else {
             phase = 'NEUTRAL';
-            status = {
-                macd: '⚪ NEUTRO',
-                sinal: '⚪ NEUTRO',
-                histograma: '⚪ NEUTRO'
-            };
+            status = { macd: '⚪ NEUTRO', sinal: '⚪ NEUTRO', histograma: '⚪ NEUTRO' };
         }
 
         const multiplier = this.getPhaseMultiplier(phase);
@@ -197,15 +161,16 @@ class MacdPhaseAnalyzer {
             'STRONG_BEAR': 1.3,
             'CROSS_BULL': 1.2,
             'CROSS_BEAR': 1.2,
-            'WEAK_BULL': 0.7,
-            'WEAK_BEAR': 0.7,
+            'WEAK_BULL': 0.85,   // [RETIFICADO] 0.7 → 0.85 (menos penalização)
+            'WEAK_BEAR': 0.85,   // [RETIFICADO] 0.7 → 0.85
             'NEUTRAL': 0.5
         };
         return multipliers[phase] || 1.0;
     }
 
     shouldTrade(phase) {
-        const tradeAllowed = ['STRONG_BULL', 'STRONG_BEAR', 'CROSS_BULL', 'CROSS_BEAR'];
+        // [RETIFICADO] WEAK_BULL/WEAK_BEAR agora permitem trade com alerta
+        const tradeAllowed = ['STRONG_BULL', 'STRONG_BEAR', 'CROSS_BULL', 'CROSS_BEAR', 'WEAK_BULL', 'WEAK_BEAR'];
         return tradeAllowed.includes(phase);
     }
 
@@ -249,9 +214,6 @@ class SistemaAnaliseInteligente {
         
         this.multiTimeframeManager = new MultiTimeframeManager();
         this.timeframesData = {};
-        
-        // 🔥 NOVO: Armazenar ADX atual para uso na detecção de divergências
-        this._adxAtual = 0;
     }
 
     getTimeframeSeconds(tf) {
@@ -266,76 +228,115 @@ class SistemaAnaliseInteligente {
         return now >= candleEnd - CANDLE_CLOSE_TOLERANCE;
     }
 
-    // ========== FUNÇÃO CORRIGIDA: DETECTAR DIVERGÊNCIAS MACD ==========
-    detectarDivergenciaMACD(macdData) {
+    // ========== [RETIFICADO] DETECTAR DIVERGÊNCIAS MACD REAIS ==========
+    // Agora distingue:
+    // 1. Fase MACD (WEAK_BULL/WEAK_BEAR) = perda de força normal → NÃO é divergência
+    // 2. Divergência de preço vs MACD = sinal real de reversão → SIM é divergência
+    detectarDivergenciaMACD(macdData, candles, adxAtual) {
         if (!macdData || !macdData.valido) return { divergencia: false, motivo: '' };
         
         const { macd, sinal, histograma } = macdData;
         
-        // 🔥 CORREÇÃO 1: Se ADX for forte (> 25), IGNORAR divergências MACD
-        if (this._adxAtual && this._adxAtual > 25) {
+        // [RETIFICADO] Se ADX forte (> 25), ignorar divergências (tendência dominante)
+        if (adxAtual && adxAtual > 25) {
             return { 
                 divergencia: false, 
-                motivo: `ADX forte (${this._adxAtual.toFixed(1)}) ignorando divergências` 
+                motivo: `ADX forte (${adxAtual.toFixed(1)}) - tendência dominante, ignorando divergências` 
             };
         }
         
-        // Caso 1: MACD positivo e sinal positivo, mas histograma negativo
-        if (macd > 0 && sinal > 0 && histograma < 0) {
-            return {
-                divergencia: true,
-                tipo: 'DIVERGÊNCIA BEARISH',
-                motivo: 'MACD e sinal positivos mas histograma negativo - MOMENTO CONTRÁRIO À TENDÊNCIA',
-                acao: 'HOLD',
-                probabilidadeReducao: 0.7
+        // [RETIFICADO] WEAK_BULL e WEAK_BEAR NÃO SÃO divergências - são fases normais
+        // Só detetar divergência se for CRUZAMENTO RECENTE ou NEUTRO com conflito
+        const isWeakPhase = (macd > 0 && sinal > 0 && histograma < 0) || 
+                           (macd < 0 && sinal < 0 && histograma > 0);
+        
+        if (isWeakPhase) {
+            return { 
+                divergencia: false, 
+                motivo: 'Fase WEAK - perda de força normal, não divergência de reversão',
+                tipo: 'PERDA_FORCA',
+                acao: 'MANter_SINAL'  // Mantém o sinal da tendência, não força HOLD
             };
         }
         
-        // Caso 2: MACD negativo e sinal negativo, mas histograma positivo
-        if (macd < 0 && sinal < 0 && histograma > 0) {
+        // Caso 1: Cruzamento de alta recente (MACD positivo, sinal ainda negativo)
+        if (macd > 0 && sinal < 0 && histograma > 0) {
             return {
                 divergencia: true,
-                tipo: 'DIVERGÊNCIA BULLISH',
-                motivo: 'MACD e sinal negativos mas histograma positivo - MOMENTO CONTRÁRIO À TENDÊNCIA',
-                acao: 'HOLD',
-                probabilidadeReducao: 0.7
-            };
-        }
-        
-        // Caso 3: MACD positivo mas sinal negativo (cruzamento de alta recente)
-        if (macd > 0 && sinal < 0) {
-            return {
-                divergencia: true,
-                tipo: 'CRUZAMENTO DE ALTA RECENTE',
-                motivo: 'MACD acabou de cruzar para cima - AGUARDAR CONFIRMAÇÃO',
+                tipo: 'CRUZAMENTO_ALTA_RECENTE',
+                motivo: 'MACD cruzou para cima - aguardar confirmação do sinal',
                 acao: 'HOLD',
                 probabilidadeReducao: 0.8
             };
         }
         
-        // Caso 4: MACD negativo mas sinal positivo (cruzamento de baixa recente)
-        if (macd < 0 && sinal > 0) {
+        // Caso 2: Cruzamento de baixa recente (MACD negativo, sinal ainda positivo)
+        if (macd < 0 && sinal > 0 && histograma < 0) {
             return {
                 divergencia: true,
-                tipo: 'CRUZAMENTO DE BAIXA RECENTE',
-                motivo: 'MACD acabou de cruzar para baixo - AGUARDAR CONFIRMAÇÃO',
+                tipo: 'CRUZAMENTO_BAIXA_RECENTE',
+                motivo: 'MACD cruzou para baixo - aguardar confirmação do sinal',
                 acao: 'HOLD',
                 probabilidadeReducao: 0.8
             };
         }
         
-        // Caso 5: MACD próximo de zero (neutro)
+        // Caso 3: MACD próximo de zero (neutro) com candles fortes
         if (Math.abs(macd) < 0.001 && Math.abs(histograma) < 0.001) {
-            return {
-                divergencia: true,
-                tipo: 'MACD NEUTRO',
-                motivo: 'MACD próximo de zero - TENDÊNCIA INDEFINIDA',
-                acao: 'HOLD',
-                probabilidadeReducao: 0.7
-            };
+            // [RETIFICADO] Só forçar HOLD se houver candles de reversão claros
+            if (candles && candles.length >= 3) {
+                const ultimos = candles.slice(-3);
+                const tendenciaClara = ultimos.every(c => parseFloat(c.close) > parseFloat(c.open)) ||
+                                      ultimos.every(c => parseFloat(c.close) < parseFloat(c.open));
+                if (!tendenciaClara) {
+                    return {
+                        divergencia: true,
+                        tipo: 'MACD_NEUTRO_INDEFINIDO',
+                        motivo: 'MACD neutro e mercado indefinido',
+                        acao: 'HOLD',
+                        probabilidadeReducao: 0.7
+                    };
+                }
+            }
+            return { divergencia: false, motivo: 'MACD neutro mas mercado com direção' };
         }
         
-        return { divergencia: false, motivo: '' };
+        // [RETIFICADO] Divergência REAL de preço vs MACD (requer candles)
+        if (candles && candles.length >= 10) {
+            const precos = candles.map(c => parseFloat(c.close));
+            const macdLine = macd;
+            
+            // Detetar topo duplo no preço com topo mais baixo no MACD (bearish)
+            const precoMax1 = Math.max(...precos.slice(-10, -5));
+            const precoMax2 = Math.max(...precos.slice(-5));
+            const macdTrend = macdLine > 0 ? 'alta' : 'baixa';
+            
+            if (precoMax2 > precoMax1 * 1.01 && macdTrend === 'baixa') {
+                return {
+                    divergencia: true,
+                    tipo: 'DIVERGENCIA_BEARISH_REAL',
+                    motivo: 'Preço fez topo mais alto mas MACD em baixa - reversão provável',
+                    acao: 'HOLD',
+                    probabilidadeReducao: 0.6
+                };
+            }
+            
+            // Detetar fundo duplo no preço com fundo mais alto no MACD (bullish)
+            const precoMin1 = Math.min(...precos.slice(-10, -5));
+            const precoMin2 = Math.min(...precos.slice(-5));
+            
+            if (precoMin2 < precoMin1 * 0.99 && macdTrend === 'alta') {
+                return {
+                    divergencia: true,
+                    tipo: 'DIVERGENCIA_BULLISH_REAL',
+                    motivo: 'Preço fez fundo mais baixo mas MACD em alta - reversão provável',
+                    acao: 'HOLD',
+                    probabilidadeReducao: 0.6
+                };
+            }
+        }
+        
+        return { divergencia: false, motivo: 'Sem divergência significativa' };
     }
 
     calcularMediaSimples(precos, periodo) {
@@ -439,13 +440,9 @@ class SistemaAnaliseInteligente {
     }
 
     async analisar(candles, timeframeKey = 'M5') {
-        // Verificação mínima de candles – sem descartar a vela aberta
         if (!candles || candles.length < 20) {
             return { erro: "Dados insuficientes (mínimo 20 candles)" };
         }
-
-        // ⚡ O bloco que removia a última vela foi ELIMINADO
-        // Agora a análise utiliza TODAS as velas disponíveis, incluindo a vela atual (aberta)
 
         const fechamentos = candles.map(c => parseFloat(c.close));
         const precoAtual = fechamentos[fechamentos.length - 1];
@@ -457,9 +454,7 @@ class SistemaAnaliseInteligente {
         const volatilidade = this.sistemaPesos.getVolatilidade();
         const rsi = this.calcularRSI(fechamentos);
         const adxData = this.calcularADXCompleto(candles);
-        
-        // 🔥 CORREÇÃO 2: Guardar ADX atual para uso na detecção de divergências
-        this._adxAtual = adxData.adx;
+        const adxAtual = adxData.adx;  // [RETIFICADO] Guardar localmente, não em this._adxAtual
         
         const macdResult = this.calcularMACD(fechamentos);
         const volatilidadeAtual = this.calcularVolatilidade(candles, precoAtual);
@@ -474,19 +469,23 @@ class SistemaAnaliseInteligente {
         console.log(`   Recomendação: ${macdPhase.recomendacao}`);
         console.log(`   Multiplicador: ${macdPhase.multiplier.toFixed(2)}x`);
 
-        // ========== DETECTAR DIVERGÊNCIAS MACD ==========
-        const divergenciaMACD = this.detectarDivergenciaMACD(macdResult);
+        // ========== [RETIFICADO] DETECTAR DIVERGÊNCIAS MACD REAIS ==========
+        const divergenciaMACD = this.detectarDivergenciaMACD(macdResult, candles, adxAtual);
 
         const analiseDupla = this.sistemaDuplaTendencia.analisarTendenciasDuplas(
             candles, macdResult, rsi, adxData
         );
         const sinalDupla = this.sistemaDuplaTendencia.calcularSinalFinal(analiseDupla);
 
-        // ========== NOVO: FORÇAR HOLD SE HOUVER DIVERGÊNCIA MACD ==========
-        if (divergenciaMACD.divergencia) {
-            console.log(`   ⛔ Divergência MACD detectada: forçando HOLD para ${timeframeKey}`);
+        // [RETIFICADO] Só forçar HOLD se for divergência REAL (não WEAK_BULL/WEAK_BEAR)
+        if (divergenciaMACD.divergencia && divergenciaMACD.acao === 'HOLD') {
+            console.log(`   ⛔ Divergência MACD REAL detectada (${divergenciaMACD.tipo}): forçando HOLD para ${timeframeKey}`);
             sinalDupla.sinal = 'HOLD';
-            sinalDupla.probabilidade = 0.3; // valor baixo para anular peso
+            sinalDupla.probabilidade *= (divergenciaMACD.probabilidadeReducao || 0.5);
+        } else if (divergenciaMACD.tipo === 'PERDA_FORCA') {
+            console.log(`   ⚠️ Perda de força detectada (${timeframeKey}): mantendo sinal ${sinalDupla.sinal} com alerta`);
+            // [RETIFICADO] NÃO força HOLD - mantém sinal com probabilidade reduzida
+            sinalDupla.probabilidade *= 0.85;
         }
         
         const sinalCombinado = this.quasimodoAnalyzer.generateCombinedSignal(
@@ -537,14 +536,6 @@ class SistemaAnaliseInteligente {
             divergencia_macd: divergenciaMACD
         };
         
-        // 🔥 REMOVIDO: consolidateSignals() NÃO deve ser chamado aqui
-        // const consolidated = this.multiTimeframeManager.consolidateSignals();
-        
-        // 🔥 REMOVIDO: coletarAnalisesVelocidade também não deve ser usado aqui
-        // const velocidades = this.coletarAnalisesVelocidade(this.multiTimeframeManager.allAnalyses);
-        // const comparacaoVelocidade = this.velocidadeAnalyzer.compararVelocidadeEntreTimeframes(velocidades);
-
-        // 🔥 AGORA retornamos apenas a análise individual, sem consolidação
         const resultado = {
             sinal: sinalDupla.sinal,
             direcao: sinalDupla.sinal === "CALL" ? "ALTA" : sinalDupla.sinal === "PUT" ? "BAIXA" : "NEUTRA",
@@ -596,7 +587,6 @@ class SistemaAnaliseInteligente {
             velocidade_analysis: velocidadeAnalysis,
             divergencia_macd: divergenciaMACD,
             
-            // ========== NOVA INFORMAÇÃO DE FASE MACD ==========
             macd_phase: {
                 phase: macdPhase.phase,
                 name: macdPhase.name,
