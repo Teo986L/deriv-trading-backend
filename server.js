@@ -762,33 +762,14 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
     const modePrimaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
     const allTfsAgree = callCountDiv === modeTimeframes.length || putCountDiv === modeTimeframes.length;
-
-    let totalPenalty = 0;
-    let warningTfs = [];
-
+    // Alerta informativo – sem penalizar confiança
     for (const tfKey of modeTimeframes) {
         const phase = mtfManager.timeframes[tfKey]?.analysis?.macd_phase?.name;
         if (phase && phase.includes('PERDENDO FORÇA')) {
-            const isPrimary = tfKey === modePrimaryTf;
-            const penalty = isPrimary ? 0.08 : 0.04;
-            totalPenalty += penalty;
-            warningTfs.push(tfKey);
+            console.warn(`⚠️ Alerta: ${tfKey} com ${phase} — monitorar perda de força`);
         }
     }
-
-    if (totalPenalty > 0 && consolidated.signal !== 'HOLD') {
-        const originalConfidence = consolidated.confidence;
-        const maxPenalty = allTfsAgree ? 0.08 : 0.15;
-        const appliedPenalty = Math.min(totalPenalty, maxPenalty);
-        consolidated.confidence = Math.max(0.10, consolidated.confidence - appliedPenalty);
-        console.log(
-            `⚠️ Penalização "Perdendo Força" nos TFs [${warningTfs.join(', ')}]: ` +
-            `-${(appliedPenalty * 100).toFixed(0)}% ` +
-            `(${(originalConfidence * 100).toFixed(1)}% → ${(consolidated.confidence * 100).toFixed(1)}%) ` +
-            `| TFs unânimes: ${allTfsAgree}`
-        );
-    }
-
+    
     let primaryTrendNote = null;
     if (consolidated.signal === 'HOLD') {
         const trendTFMap = { 'SNIPER': 'M15', 'CAÇADOR': 'H1', 'PESCADOR': 'H24' };
@@ -1005,7 +986,7 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🏷️  Deteção de ativo: 9 tipos (volatility/boom/crash/jump/step/commodity/cripto/forex/normal)`);
   console.log(`💧 Liquidity Hunter Robusto ativo`);
   console.log(`💾 Cache em memória anti-ruído ativo (max ${MAX_MEMORY_CACHE_SIZE} entradas)`);
-  console.log(`⚠️ Penalização "Perdendo Força": -8% primário / -4% secundário (máx -8% se TFs unânimes)`);
+  console.log(`ℹ️ "Perdendo Força": apenas alerta informativo.`);
   console.log(`🔧 FIX: liquidityResult.confidence normalizado para escala 0-1`);
   console.log(`🧭 Nota de tendência primária ativa`);
   console.log(`⛔ Penalização de Timing: limitada a 35% se o TF primário não confirma`);
