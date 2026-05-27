@@ -674,7 +674,9 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         const tf = timeframesToAnalyze.find(t => t.key === tfKey) || ALL_TIMEFRAMES_CONFIG[tfKey];
         if (!tf) return;
         try {
-          const candles = await getCandlesWithCache(client, symbol, tf, mode, false);
+          // ✅ SEMPRE FRESCO para os timeframes do modo atual (evita sinais congelados)
+          const isModeTimeframe = modeTimeframes.includes(tfKey);
+          const candles = await getCandlesWithCache(client, symbol, tf, mode, isModeTimeframe);
           if (Array.isArray(candles) && candles.length > 0) candlesMap[tfKey] = candles;
         } catch (err) { console.error(`❌ ${tfKey}:`, err.message); }
       })
@@ -691,14 +693,35 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     if (typeof mtfManager.setTipoAtivo === 'function') mtfManager.setTipoAtivo(tipoAtivo);
     else if (mtfManager.tipoAtivo !== undefined) mtfManager.tipoAtivo = tipoAtivo;
 
-    const sistemaBase = new SistemaAnaliseInteligente(symbol);
+       const sistemaBase = new SistemaAnaliseInteligente(symbol);
     if (sistemaBase.sistemaPesos?.setTipoAtivo) sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
+
+    // ✅ HOT-UPDATE PREP: Resolve preço actual antes de analisar (para actualizar candles em aberto)
+    let currentPrice = null;
+    let priceSource = 'tick';
+    try {
+      currentPrice = await tickPromise;
+    } catch (e) {
+      currentPrice = null;
+    }
 
     await Promise.all(
       timeframesToAnalyze.map(async (tf) => {
         try {
           const candles = candlesMap[tf.key];
           if (!candles || candles.length < tf.minRequired) return;
+
+          // ✅ HOT UPDATE: Actualiza o candle em aberto com o preço do tick em tempo real
+          if (currentPrice && candles.length > 0) {
+            const last = candles[candles.length - 1];
+            if (!isCandleClosed(last, tf.seconds)) {
+              const price = parseFloat(currentPrice);
+              last.close = price.toString();
+              if (price > parseFloat(last.high)) last.high = price.toString();
+              if (price < parseFloat(last.low)) last.low = price.toString();
+            }
+          }
+
           const analysis = await sistemaBase.analisar(candles, tf.key);
           if (analysis && !analysis.erro) {
             mtfManager.addAnalysis(tf.key, analysis);
@@ -740,7 +763,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       consolidated.confidence = Math.min(consolidated.confidence, 0.3);
     }
 
-    const PRIMARY_TF_MAP = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+        const PRIMARY_TF_MAP = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
     const primaryTf = PRIMARY_TF_MAP[mode] || 'M5';
 
     const primaryCandles = candlesMap[primaryTf];
@@ -748,10 +771,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const candleOpenPrice = currentOpenCandle?.open ?? null;
     const primaryOpenTf = primaryTf;
 
-    const tickResult = await tickPromise;
-    let currentPrice = tickResult;
-    let priceSource = 'tick';
-
+    // Se o tick falhou no hot-update, tenta fallbacks
     if (!currentPrice) {
       for (const tf of [primaryTf, 'M1', 'M5', 'M15', 'H1', 'H4']) {
         const p = mtfManager.timeframes[tf]?.analysis?.preco_atual;
