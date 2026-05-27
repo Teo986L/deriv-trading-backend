@@ -10,7 +10,6 @@ const MultiTimeframeManager = require('./multi-timeframe-manager');
 const BotExecutionCore = require('./bot-execution-core');
 const TraderBotAnalise = require('./analyzers/trader-bot-analyzer');
 const CandleTradeAnalyzer = require('./trade-analyzer');
-const tradeAnalyzer = new CandleTradeAnalyzer(0.002, 3); // 0.2% margem, 3x risco
 const { API_TOKEN, CANDLE_CLOSE_TOLERANCE } = require('./config'); // [RETIFICADO] Removido SMOOTHING (não usado)
 const { detectLiquiditySweepRobusto, calculateATR: calcularATRLiquidity } = require('./analyzers/liquidity-hunter-robusto');
 
@@ -156,11 +155,34 @@ function isCandleClosed(candle, timeframeSeconds) {
 
 const inFlightRequests = new Map();
 
+// ── Detetor de tipo de ativo ─────────
+function detectTipoAtivo(symbol) {
+    if (/^WLD/i.test(symbol)) return 'forex';
+    if (symbol.startsWith('R_') || symbol.startsWith('1HZ')) return 'volatility_index';
+    if (/^BOOM/i.test(symbol))   return 'boom_index';
+    if (/^CRASH/i.test(symbol))  return 'crash_index';
+    if (/^JD/i.test(symbol))     return 'jump_index';
+    if (/^stpRNG/i.test(symbol)) return 'step_index';
+    if (/^RB\d+$/i.test(symbol) || /^RDBEAR$/i.test(symbol) || /^RDBULL$/i.test(symbol)) {
+        return 'volatility_index';
+    }
+    if (/XAU|XAG|XPD|XPT/i.test(symbol)) return 'commodity';
+    if (/^cry/i.test(symbol)) return 'criptomoeda';
+    if (/^frx/i.test(symbol)) return 'forex';
+    if (/^OTC_/i.test(symbol)) return 'indice_normal';
+    return 'indice_normal';
+}
+
 // ========== FUNÇÃO DE CACHE UNIFICADA (MEMÓRIA + REDIS) ==========
 async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false, ttlOverride = null) {
   const cacheKey = `candles:${symbol}:${tf.key}`;
-  const ttl = ttlOverride !== null ? ttlOverride : getTTLAlignedToCandle(tf.seconds);
-
+  let ttl = ttlOverride !== null ? ttlOverride : getTTLAlignedToCandle(tf.seconds);
+  const tipoAtivo = detectTipoAtivo(symbol);
+  const isAtivoPulso = ['boom_index','crash_index','jump_index','step_index'].includes(tipoAtivo);
+  if (isAtivoPulso && mode === 'SNIPER' && tf.key === 'M1') {
+    ttl = Math.min(ttl, 10);
+    console.log(`⚡ TTL reduzido para ${ttl}s (ativo de pulso + SNIPER)`);
+  }
   // 1. Tenta cache em memória
   if (!forceFresh) {
     const memCached = getFromMemoryCache(cacheKey);
@@ -481,6 +503,30 @@ const RSI_LIMITS_BY_ASSET = {
   'step_index':      { pullback: 32, extremo: 28, sobrecompra: 72, sobrevenda: 28 }
 };
 
+// ========== RSI LIMITS DINÂMICOS POR ATIVO + MODO ==========
+const RSI_PULSO_LIMITS = {
+  'boom_index': {
+    'SNIPER':   { callMax: 55, callMin: 35, putOSell: 35, putOBuy: 68 },
+    'CAÇADOR':  { callMax: 60, callMin: 40, putOSell: 35, putOBuy: 68 },
+    'PESCADOR': { callMax: 65, callMin: 45, putOSell: 35, putOBuy: 68 }
+  },
+  'crash_index': {
+    'SNIPER':   { callMax: 65, callMin: 45, putOSell: 32, putOBuy: 62 },
+    'CAÇADOR':  { callMax: 60, callMin: 40, putOSell: 32, putOBuy: 62 },
+    'PESCADOR': { callMax: 55, callMin: 35, putOSell: 32, putOBuy: 62 }
+  },
+  'jump_index': {
+    'SNIPER':   { callMax: 60, callMin: 40, putOSell: 40, putOBuy: 60 },
+    'CAÇADOR':  { callMax: 55, callMin: 45, putOSell: 40, putOBuy: 60 },
+    'PESCADOR': { callMax: 60, callMin: 40, putOSell: 40, putOBuy: 60 }
+  },
+  'step_index': {
+    'SNIPER':   { callMax: 58, callMin: 38, putOSell: 40, putOBuy: 58 },
+    'CAÇADOR':  { callMax: 60, callMin: 40, putOSell: 40, putOBuy: 58 },
+    'PESCADOR': { callMax: 62, callMin: 42, putOSell: 40, putOBuy: 58 }
+  }
+};
+
 function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
   const limite = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
   let alerta = null;
@@ -526,7 +572,7 @@ function gerarAlertaPullback(rsi, primarySignal, tipoAtivo, timeframeLabel) {
 }
 
 // ── Funções de timing ────────
-function buildTimingResult(analysis, signal, tf, label) {
+function buildTimingResult(analysis, signal, tf, label, mode) {
   if (!analysis) return { permitido: false, motivo: `${label} não disponível`, rsi: null, sinal: null, adx: null, alerta_pullback: null };
 
   const adx       = analysis.adx || 0;
@@ -538,19 +584,20 @@ function buildTimingResult(analysis, signal, tf, label) {
 
   let rsiMax, rsiMin, rsiOSell, rsiOBuy;
 
-  if (tipoAtivo === 'boom_index') {
-    rsiMax   = 62;  rsiMin   = 22;  rsiOSell = 35;  rsiOBuy  = 68;
-  } else if (tipoAtivo === 'crash_index') {
-    rsiMax   = 78;  rsiMin   = 38;  rsiOSell = 32;  rsiOBuy  = 62;
-  } else if (tipoAtivo === 'jump_index') {
-    rsiMax   = 65;  rsiMin   = 35;  rsiOSell = 40;  rsiOBuy  = 60;
-  } else if (tipoAtivo === 'step_index') {
-    rsiMax   = 62;  rsiMin   = 38;  rsiOSell = 40;  rsiOBuy  = 60;
+  // ✅ Usar RSI_PULSO_LIMITS global (não recriar a cada chamada)
+  const limite = RSI_PULSO_LIMITS[tipoAtivo]?.[mode];
+  if (limite) {
+    rsiMax = limite.callMax;
+    rsiMin = limite.callMin;
+    rsiOSell = limite.putOSell;
+    rsiOBuy = limite.putOBuy;
   } else {
-    rsiMax   = label === 'M15' ? 72 : 75;
-    rsiMin   = label === 'M15' ? 28 : 25;
-    rsiOSell = label === 'M15' ? 36 : 38;
-    rsiOBuy  = label === 'M15' ? 65 : 62;
+    // Fallback para ativos normais (mantém lógica original)
+    if (label === 'M15') {
+      rsiMax = 72; rsiMin = 28; rsiOSell = 36; rsiOBuy = 65;
+    } else {
+      rsiMax = 75; rsiMin = 25; rsiOSell = 38; rsiOBuy = 62;
+    }
   }
 
   if (signal === 'CALL') {
@@ -580,9 +627,10 @@ function buildTimingResult(analysis, signal, tf, label) {
   return { permitido: false, motivo: `${label} sinal indeterminado (RSI ${rsi.toFixed(0)}, ADX ${adx.toFixed(0)})`, rsi, sinal: analysis.sinal, adx, alerta_pullback };
 }
 
-function calcularTimingM1(a, s)  { return buildTimingResult(a, s, 'M1',  'M1'); }
-function calcularTimingM5(a, s)  { return buildTimingResult(a, s, 'M5',  'M5'); }
-function calcularTimingM15(a, s) { return buildTimingResult(a, s, 'M15', 'M15'); }
+// [RETIFICADO] Adicionar parâmetro mode em M5 e M15
+function calcularTimingM1(a, s, mode)  { return buildTimingResult(a, s, 'M1',  'M1', mode); }
+function calcularTimingM5(a, s, mode)  { return buildTimingResult(a, s, 'M5',  'M5', mode); }
+function calcularTimingM15(a, s, mode) { return buildTimingResult(a, s, 'M15', 'M15', mode); }
 function calcularTimingH1(a, s) {
   if (!a) return { permitido: false, motivo: 'H1 não disponível', rsi: null, sinal: null, adx: null, alerta_pullback: null };
   return { permitido: false, motivo: 'H1 é TF de tendência', rsi: a.rsi || 50, sinal: a.sinal, adx: a.adx || 0, alerta_pullback: gerarAlertaPullback(a.rsi || 50, s, a.tipo_ativo || 'indice_normal', 'H1') };
@@ -592,32 +640,41 @@ function calcularTimingH4(a, s) {
   return { permitido: false, motivo: 'H4 é TF de tendência', rsi: a.rsi || 50, sinal: a.sinal, adx: a.adx || 0, alerta_pullback: gerarAlertaPullback(a.rsi || 50, s, a.tipo_ativo || 'indice_normal', 'H4') };
 }
 
-// ── Detetor de tipo de ativo ─────────
-function detectTipoAtivo(symbol) {
-    if (/^WLD/i.test(symbol)) return 'forex';
-    if (symbol.startsWith('R_') || symbol.startsWith('1HZ')) return 'volatility_index';
-    if (/^BOOM/i.test(symbol))   return 'boom_index';
-    if (/^CRASH/i.test(symbol))  return 'crash_index';
-    if (/^JD/i.test(symbol))     return 'jump_index';
-    if (/^stpRNG/i.test(symbol)) return 'step_index';
-    if (/^RB\d+$/i.test(symbol) || /^RDBEAR$/i.test(symbol) || /^RDBULL$/i.test(symbol)) {
-        return 'volatility_index';
-    }
-    if (/XAU|XAG|XPD|XPT/i.test(symbol)) return 'commodity';
-    if (/^cry/i.test(symbol)) return 'criptomoeda';
-    if (/^frx/i.test(symbol)) return 'forex';
-    if (/^OTC_/i.test(symbol)) return 'indice_normal';
-    return 'indice_normal';
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // ROTA PRINCIPAL — /api/analyze
 // ═══════════════════════════════════════════════════════════════════════════════
-function calcularStopTakePorModo(candlesMap, mode, timing) {
-    const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
-    const primaryTf = PRIMARY_TF_BY_MODE[mode];
-    if (!primaryTf || !timing || !timing.permitido) return null;
+function detectarPulsoRecente(candles, tipoAtivo) {
+  if (!['boom_index','crash_index'].includes(tipoAtivo)) return null;
+  if (!candles || candles.length < 10) return null;
+  
+  const ultimo = candles[candles.length - 1];
+  const anterior = candles[candles.length - 2];
+  
+  const bodyUltimo = Math.abs(parseFloat(ultimo.close) - parseFloat(ultimo.open));
+  const bodyAnterior = Math.abs(parseFloat(anterior.close) - parseFloat(anterior.open));
+  const mediaBody = candles.slice(-10, -1).reduce((s, c) => 
+    s + Math.abs(parseFloat(c.close) - parseFloat(c.open)), 0) / 9;
+  
+  if (bodyAnterior > mediaBody * 3) {
+    const direcao = parseFloat(anterior.close) > parseFloat(anterior.open) ? 'CALL' : 'PUT';
+    const tipoPulso = tipoAtivo === 'boom_index' ? 'BOOM' : 'CRASH';
+    return {
+      detectado: true,
+      direcao,
+      tipo: tipoPulso,
+      magnitude: (bodyAnterior / mediaBody).toFixed(1) + 'x',
+      mensagem: `⚠️ ${tipoPulso} ${direcao} detectado no candle anterior (${(bodyAnterior/mediaBody).toFixed(1)}× média). Aguarde retração antes de entrar.`
+    };
+  }
+  return null;
+}
 
+// [RETIFICADO] tradeAnalyzer agora é criado dinamicamente dentro da função
+function calcularStopTakePorModo(candlesMap, mode, timing, tipoAtivo) {
+    const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+    const primaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
+    if (!primaryTf || !timing || !timing.permitido) return null;
+  
     const candles = candlesMap[primaryTf];
     if (!candles || candles.length === 0) return null;
 
@@ -630,6 +687,12 @@ function calcularStopTakePorModo(candlesMap, mode, timing) {
 
     const sinalTiming = timing.sinal;   // 'CALL' ou 'PUT'
 
+    // ✅ Criar tradeAnalyzer dinamicamente baseado no tipo de ativo
+    const isAtivoPulso = ['boom_index','crash_index','jump_index','step_index'].includes(tipoAtivo);
+    const margem = isAtivoPulso ? 0.02 : 0.002; // 2% vs 0.2%
+    const riscoMult = isAtivoPulso ? 2 : 3;
+    const tradeAnalyzer = new CandleTradeAnalyzer(margem, riscoMult);
+
     if (sinalTiming === 'CALL') {
         return tradeAnalyzer.calcularNiveisLong(ultimoCandle);
     } else if (sinalTiming === 'PUT') {
@@ -637,6 +700,36 @@ function calcularStopTakePorModo(candlesMap, mode, timing) {
     }
     return null;
 }
+
+function calcularPontoFranco(mtfManager, tipoAtivo) {
+  if (!['boom_index','crash_index'].includes(tipoAtivo)) return null;
+  
+  const h4 = mtfManager.timeframes['H4']?.analysis;
+  const m1 = mtfManager.timeframes['M1']?.analysis;
+  const m5 = mtfManager.timeframes['M5']?.analysis;
+  const m15 = mtfManager.timeframes['M15']?.analysis;
+  
+  if (!h4 || !m1 || !m5 || !m15) return null;
+  
+  const alinhado = h4.sinal === m1.sinal && m1.sinal === m5.sinal && m5.sinal === m15.sinal;
+  const h4Forte = h4.adx > 30;
+  const m1Forte = m1.adx > 35;
+  
+  if (alinhado && h4Forte && m1Forte && h4.sinal !== 'HOLD') {
+    return {
+      tipo: `PONTO_FRANCO_${h4.sinal}`,
+      confianca: 0.95,
+      detalhes: {
+        h4_adx: h4.adx,
+        m1_adx: m1.adx,
+        direcao: h4.sinal,
+        timeframes_alinhados: ['H4','M15','M5','M1']
+      }
+    };
+  }
+  return null;
+}
+
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
 
@@ -693,7 +786,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     if (typeof mtfManager.setTipoAtivo === 'function') mtfManager.setTipoAtivo(tipoAtivo);
     else if (mtfManager.tipoAtivo !== undefined) mtfManager.tipoAtivo = tipoAtivo;
 
-       const sistemaBase = new SistemaAnaliseInteligente(symbol);
+    const sistemaBase = new SistemaAnaliseInteligente(symbol);
     if (sistemaBase.sistemaPesos?.setTipoAtivo) sistemaBase.sistemaPesos.setTipoAtivo(tipoAtivo);
 
     // ✅ HOT-UPDATE PREP: Resolve preço actual antes de analisar (para actualizar candles em aberto)
@@ -732,6 +825,12 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     );
 
     const consolidated = mtfManager.consolidateSignals();
+    // ADICIONAR APÓS:
+    const pontoFranco = calcularPontoFranco(mtfManager, tipoAtivo);
+    if (pontoFranco) {
+      consolidated.ponto_franco = pontoFranco;
+      console.log(`⚡ ${pontoFranco.tipo} detectado!`);
+    }
     const agreement    = mtfManager.calculateAgreement();
     consolidated.tipo_ativo = tipoAtivo;
 
@@ -747,6 +846,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       consolidated.signal = 'HOLD';
       consolidated.confidence = Math.min(consolidated.confidence, 0.3);
     }
+    
 
     let hasMacdDivergence = false;
     for (const tfKey of modeTimeframes) {
@@ -763,10 +863,15 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       consolidated.confidence = Math.min(consolidated.confidence, 0.3);
     }
 
-        const PRIMARY_TF_MAP = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+    const PRIMARY_TF_MAP = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
     const primaryTf = PRIMARY_TF_MAP[mode] || 'M5';
 
     const primaryCandles = candlesMap[primaryTf];
+    const recentPulse = detectarPulsoRecente(primaryCandles, tipoAtivo);
+    if (recentPulse) {
+      console.log(`🚨 ${recentPulse.mensagem}`);
+    }
+    
     const currentOpenCandle = primaryCandles?.at(-1);
     const candleOpenPrice = currentOpenCandle?.open ?? null;
     const primaryOpenTf = primaryTf;
@@ -874,9 +979,10 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     })();
 
     let m1Timing = null, m5Timing = null, m15Timing = null, h1Timing = null, h4Timing = null;
-    if (modeTimeframes.includes('M1'))  m1Timing  = calcularTimingM1(mtfManager.timeframes['M1']?.analysis,  primarySignal);
-    if (modeTimeframes.includes('M5'))  m5Timing  = calcularTimingM5(mtfManager.timeframes['M5']?.analysis,  primarySignal);
-    if (modeTimeframes.includes('M15')) m15Timing = calcularTimingM15(mtfManager.timeframes['M15']?.analysis, primarySignal);
+    if (modeTimeframes.includes('M1'))  m1Timing  = calcularTimingM1(mtfManager.timeframes['M1']?.analysis,  primarySignal, mode);
+    if (modeTimeframes.includes('M5'))  m5Timing  = calcularTimingM5(mtfManager.timeframes['M5']?.analysis,  primarySignal, mode);
+    if (modeTimeframes.includes('M15')) m15Timing = calcularTimingM15(mtfManager.timeframes['M15']?.analysis, primarySignal, mode);
+    // [RETIFICADO] Remover vírgula solta antes de mode
     if (modeTimeframes.includes('H1'))  h1Timing  = calcularTimingH1(mtfManager.timeframes['H1']?.analysis,  primarySignal);
     if (modeTimeframes.includes('H4'))  h4Timing  = calcularTimingH4(mtfManager.timeframes['H4']?.analysis,  primarySignal);
 
@@ -923,22 +1029,24 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       console.log(`💧 ${liquidityResult.sweepDetected ? `SWEEP ${liquidityResult.direction} ${liquidityResult.confidence}%` : 'sem sweep'}`);
     } catch (err) { console.error('❌ liquidez:', err.message); }
 
+    const isAtivoPulso = ['boom_index','crash_index','jump_index','step_index'].includes(tipoAtivo);
     const hasTfDivergenceForLiquidity = callCountDiv > 0 && putCountDiv > 0;
     let timingOk = false;
     if (mode === 'SNIPER'   && m1Timing?.permitido)  timingOk = true;
     if (mode === 'CAÇADOR'  && m5Timing?.permitido)  timingOk = true;
     if (mode === 'PESCADOR' && m15Timing?.permitido) timingOk = true;
 
-    if (!hasTfDivergenceForLiquidity && liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk) {
-        console.log(`⚠️ Liquidez substitui sinal → ${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%`);
-        consolidated.signal = liquidityResult.direction;
-        consolidated.confidence = liquidityResult.confidence / 100;
-        consolidated.simpleMajority.signal = liquidityResult.direction;
-    } else if (liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && !timingOk) {
-        console.log(`💧 Liquidez forte mas TIMING NÃO OK - mantendo sinal`);
-    } else if (hasTfDivergenceForLiquidity && liquidityResult.sweepDetected) {
-        console.log(`🔒 Liquidez detectada mas TFs divergem - mantendo sinal`);
-    }
+   if (!isAtivoPulso && !hasTfDivergenceForLiquidity && 
+    liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk) {
+    // override permitido apenas para ativos normais
+    console.log(`⚠️ Liquidez substitui sinal → ${liquidityResult.direction} ${liquidityResult.confidence.toFixed(0)}%`);
+    consolidated.signal = liquidityResult.direction;
+    consolidated.confidence = liquidityResult.confidence / 100;
+    consolidated.simpleMajority.signal = liquidityResult.direction;
+} else if (liquidityResult.sweepDetected && isAtivoPulso) {
+    // Apenas log informativo, nunca override
+    console.log(`💧 Liquidez detectada em ativo de pulso — apenas alerta informativo, não substitui sinal`);
+}
     // Obter o timing correspondente ao modo atual
     const modeTiming = (() => {
         if (mode === 'SNIPER') return m1Timing;
@@ -946,8 +1054,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         if (mode === 'PESCADOR') return m15Timing;
         return null;
     })();
-
-    const stopTakeLevels = calcularStopTakePorModo(candlesMap, mode, modeTiming);
+    
+    const stopTakeLevels = calcularStopTakePorModo(candlesMap, mode, modeTiming, tipoAtivo);
     const { analiseRefinada, validacaoRisco } = await analiseRefinadaPromise;
 
     const responseTimeframes = {};
@@ -979,15 +1087,14 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         priceMovedFromOpen,
         priceMovedDirection,
         tipo_ativo: tipoAtivo,
+        recentPulse: recentPulse || null,
         ...(m1Timing  && { m1_timing:  m1Timing  }),
         ...(m5Timing  && { m5_timing:  m5Timing  }),
         ...(m15Timing && { m15_timing: m15Timing }),
         ...(h1Timing  && { h1_timing:  h1Timing  }),
         ...(h4Timing  && { h4_timing:  h4Timing  }),
         config_ativo: consolidated.config_ativo,
-        ciclo_completo: consolidated.ciclo_completo,
-        ponto_franco: consolidated.ponto_franco,
-        alinhamento_pescador: consolidated.alinhamento_pescador,
+        ponto_franco: consolidated.ponto_franco || null,
         timing_especial: timingEspecial,
         primaryTrendNote: primaryTrendNote || null,
         timingRiskWarning: timingRiskWarning || null
@@ -1022,7 +1129,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         liquidityZone: liquidityResult.liquidityZone || null,
         details: liquidityResult.details || null,
         timingOk,
-        overrodeSignal: (!hasTfDivergenceForLiquidity && liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk)
+        overrodeSignal: (!isAtivoPulso && !hasTfDivergenceForLiquidity && liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk)
       } : { sweepDetected: false },
       metadata: { responseTimeMs: responseTime, timestamp: new Date().toISOString() }
     });
@@ -1063,6 +1170,12 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🔌 FIX: optional chaining em analise.sinal ativo`);
   console.log(`⏱️  FIX: timeout getCandles reduzido para 12s`);
   console.log(`🔒 FIX: Cache Redis com validação JSON e LRU em memória`);
+  console.log(`⚡ TTL reduzido para ativos de pulso no SNIPER (10s max)`);
+  console.log(`🎯 RSI dinâmico por modo implementado`);
+  console.log(`💠 Stop Loss dinâmico: 2% pulso / 0.2% normal`);
+  console.log(`🛡️  Override de liquidez bloqueado em ativos de pulso`);
+  console.log(`👁️  Detecção de pulso recente ativa`);
+  console.log(`⚡ Ponto Franco calculado automaticamente`);
   try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
   catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
