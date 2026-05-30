@@ -748,8 +748,8 @@ function detectarPulsoRecente(candles, tipoAtivo) {
 
 // [RETIFICADO] tradeAnalyzer agora é criado dinamicamente dentro da função
 function calcularStopTakePorModo(candlesMap, mode, timing, tipoAtivo) {
-    const PRIMARY_TF_BY_MODE = { 'CAÇADOR': 'M1', 'PESCADOR': 'M5' };
-    const primaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
+const PRIMARY_TF_BY_MODE = { 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+  const primaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
     if (!primaryTf || !timing || !timing.permitido) return null;
   
     const candles = candlesMap[primaryTf];
@@ -1142,7 +1142,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       consolidated.confidence = Math.min(consolidated.confidence, 0.3);
     }
 
-    const PRIMARY_TF_MAP = { 'CAÇADOR': 'M1', 'PESCADOR': 'M5' };
+const PRIMARY_TF_MAP = { 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
     const primaryTf = PRIMARY_TF_MAP[mode] || 'M5';
 
     const primaryCandles = candlesMap[primaryTf];
@@ -1188,10 +1188,6 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       : null;
 
     console.log(`🕯️  Open ${primaryTf}: ${candleOpenPrice} | 💰 Atual: ${currentPrice} | ${priceMovedDirection} ${priceMovedFromOpen}`);
-
-    const PRIMARY_TF_BY_MODE = { 'CAÇADOR': 'M1', 'PESCADOR': 'M5' };
-    const modePrimaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
-    const allTfsAgree = callCountDiv === modeTimeframes.length || putCountDiv === modeTimeframes.length;
     // Alerta informativo – sem penalizar confiança
     for (const tfKey of modeTimeframes) {
         const phase = mtfManager.timeframes[tfKey]?.analysis?.macd_phase?.name;
@@ -1276,8 +1272,8 @@ const modeMap = { 'CAÇADOR': 'CAÇADOR', 'PESCADOR': 'PESCADOR' };
 
     if (consolidated.signal !== 'HOLD') {
         const modeTimingMap = {
-            'CAÇADOR': m1Timing,
-            'PESCADOR': m5Timing
+            'CAÇADOR': m5Timing,
+            'PESCADOR': m15Timing
         };
         const primaryTiming = modeTimingMap[mode];
 
@@ -1310,8 +1306,8 @@ const modeMap = { 'CAÇADOR': 'CAÇADOR', 'PESCADOR': 'PESCADOR' };
     const isAtivoPulso = ['boom_index','crash_index','jump_index','step_index'].includes(tipoAtivo);
     const hasTfDivergenceForLiquidity = callCountDiv > 0 && putCountDiv > 0;
     let timingOk = false;
-    if (mode === 'CAÇADOR'  && m1Timing?.permitido)  timingOk = true;
-    if (mode === 'PESCADOR' && m5Timing?.permitido)  timingOk = true;
+    if (mode === 'CAÇADOR'  && m5Timing?.permitido)  timingOk = true;
+    if (mode === 'PESCADOR' && m15Timing?.permitido)  timingOk = true;
 
    if (!isAtivoPulso && !hasTfDivergenceForLiquidity && 
     liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk) {
@@ -1326,8 +1322,8 @@ const modeMap = { 'CAÇADOR': 'CAÇADOR', 'PESCADOR': 'PESCADOR' };
 }
     // Obter o timing correspondente ao modo atual
     const modeTiming = (() => {
-        if (mode === 'CAÇADOR') return m1Timing;
-        if (mode === 'PESCADOR') return m5Timing;
+        if (mode === 'CAÇADOR') return m5Timing;
+        if (mode === 'PESCADOR') return m15Timing;
         return null;
     })();
     
@@ -1454,8 +1450,8 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🛡️  Override de liquidez bloqueado em ativos de pulso`);
   console.log(`👁️  Detecção de pulso recente ativa`);
   console.log(`⚡ Ponto Franco calculado automaticamente`);
-  console.log(`🏹 CAÇADOR: M1+M5+M15+H1 | TF primário M1 | expiração 5-15 min`);
-  console.log(`🎣 PESCADOR: M5+M15+H1+H4+H24 | TF primário M5 | expiração 15-60 min`);
+  console.log(`🏹 CAÇADOR: M1+M5+M15+H1 | TF primário M5 | expiração 5-15 min`);
+  console.log(`🎣 PESCADOR: M5+M15+H1+H4+H24 | TF primário M15 | expiração 15-60 min`);
   console.log(`🎯 Score CAÇADOR: limiar ≥80 | Score PESCADOR: limiar ≥85`);
   try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
   catch (err) { console.error('❌ Conexão Deriv:', err); }
