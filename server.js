@@ -1197,26 +1197,30 @@ const PRIMARY_TF_MAP = { 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
     }
     
     let primaryTrendNote = null;
-    if (consolidated.signal === 'HOLD') {
-        const trendTFMap = { 'CAÇADOR': 'H1', 'PESCADOR': 'H24' };
-        let tfKey = trendTFMap[mode];
-        if (mode === 'PESCADOR') {
-            const h24 = mtfManager.timeframes['H24']?.analysis;
-            if (!h24 || h24.adx <= 20 || h24.sinal === 'HOLD') {
-                const h4 = mtfManager.timeframes['H4']?.analysis;
-                if (h4 && h4.adx > 20 && h4.sinal !== 'HOLD') {
-                    tfKey = 'H4';
-                }
+if (consolidated.signal === 'HOLD') {
+    const trendTFMap = { 'CAÇADOR': 'H1', 'PESCADOR': 'H24' };
+    let tfKey = trendTFMap[mode];
+    if (mode === 'PESCADOR') {
+        const h24 = mtfManager.timeframes['H24']?.analysis;
+        if (!h24 || h24.adx <= 20 || h24.sinal === 'HOLD') {
+            const h4 = mtfManager.timeframes['H4']?.analysis;
+            if (h4 && h4.adx > 20 && h4.sinal !== 'HOLD') {
+                tfKey = 'H4';
             }
         }
-        const analysis = mtfManager.timeframes[tfKey]?.analysis;
-        if (analysis && analysis.adx > 20 && analysis.sinal !== 'HOLD') {
-            const directionText = analysis.sinal === 'PUT' ? 'BAIXA' : 'ALTA';
-            const actionText = analysis.sinal === 'PUT' ? 'venda' : 'compra';
+    }
+    const analysis = mtfManager.timeframes[tfKey]?.analysis;
+    const tfCandles = candlesMap[tfKey];
+    if (analysis && analysis.adx > 20 && tfCandles) {
+        const trend = trendDirection(tfCandles);
+        if (trend !== 'FLAT') {
+            const directionText = trend === 'DOWN' ? 'BAIXA' : 'ALTA';
+            const actionText = trend === 'DOWN' ? 'venda' : 'compra';
             primaryTrendNote = `Tendência primária (${tfKey}): ${directionText}. Aguarde pullback para ${actionText}.`;
             console.log(`🧭 ${primaryTrendNote}`);
         }
     }
+}
 
     const suggestion = BotExecutionCore.generateEntrySuggestion(
       { sinal: consolidated.signal, probabilidade: consolidated.confidence }, currentPrice
