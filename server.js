@@ -849,9 +849,9 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
     reasons.push(`M15 tendência desalinhada (${trendM15})`);
   } else if (m15.adx <= 20) {
     reasons.push(`M15 ADX fraco (${m15.adx.toFixed(1)} ≤ 20)`);
-  } else {
+    } else {
     const m15Phase = m15.macd_phase?.name || '';
-    const isWeak = m15Phase.startsWith('WEAK'); // WEAK_BULL ou WEAK_BEAR
+    const isWeak = m15Phase.includes('PERDENDO FORÇA');   // ← alterado
     console.log(`[DEBUG] M15 Phase: "${m15Phase}", isWeak: ${isWeak}`);
     if (isWeak) {
       score += 10;
@@ -947,9 +947,10 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
   const m15PullbackOk = dir === 'UP' ? m15.rsi < 45 : m15.rsi > 55;
   if (!m15PullbackOk) {
     reasons.push(`M15 RSI sem pullback (${m15.rsi.toFixed(1)})`);
-  } else {
+   } else {
     const m15Phase = m15.macd_phase?.name || '';
-    const isWeak = m15Phase.startsWith('WEAK');
+    const isWeak = m15Phase.includes('PERDENDO FORÇA');   // ← alterado
+    console.log(`[DEBUG] M15 Phase: "${m15Phase}", isWeak: ${isWeak}`);
     if (isWeak) {
       score += 8;
       reasons.push(`⚠️ M15 pullback (RSI ${m15.rsi.toFixed(1)}) mas MACD enfraquecendo → +8 pts`);
