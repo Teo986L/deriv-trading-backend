@@ -15,6 +15,88 @@ const { detectLiquiditySweepRobusto, calculateATR: calcularATRLiquidity } = requ
 
 const app = express();
 
+// ========== INDICADORES AUXILIARES ==========
+function ema(values, period) {
+  const k = 2 / (period + 1);
+  const out = [values[0]];
+  for (let i = 1; i < values.length; i++) {
+    out.push(values[i] * k + out[i - 1] * (1 - k));
+  }
+  return out;
+}
+
+function trendDirection(candles) {
+  if (!candles || candles.length < 21) return 'FLAT';
+  const closes = candles.map(c => parseFloat(c.close));
+  const e9  = ema(closes, 9);
+  const e21 = ema(closes, 21);
+  const last9  = e9[e9.length - 1];
+  const last21 = e21[e21.length - 1];
+  if (last9 > last21 * 1.0005) return 'UP';   // margem 0.05%
+  if (last9 < last21 * 0.9995) return 'DOWN';
+  return 'FLAT';
+}
+
+function isReversalCandle(candles, direction) {
+  if (!candles || candles.length < 2) return false;
+  const c = candles[candles.length - 1];
+  const p = candles[candles.length - 2];
+  const cOpen  = parseFloat(c.open);
+  const cClose = parseFloat(c.close);
+  const pOpen  = parseFloat(p.open);
+  const pClose = parseFloat(p.close);
+  if (direction === 'UP')   return cClose > cOpen && cClose > pOpen && pClose < pOpen; // engolfo altista
+  if (direction === 'DOWN') return cClose < cOpen && cClose < pOpen && pClose > pOpen; // engolfo baixista
+  return false;
+}
+
+function rsiLeaving(rsiValues, threshold, direction) {
+  if (!rsiValues || rsiValues.length < 2) return false;
+  const current  = rsiValues[rsiValues.length - 1];
+  const previous = rsiValues[rsiValues.length - 2];
+  if (direction === 'UP')   return previous <= threshold && current > threshold;
+  if (direction === 'DOWN') return previous >= threshold && current < threshold;
+  return false;
+}
+
+// Calcula array de RSI para as últimas `window` velas (Wilder's smoothing)
+// Requer pelo menos period+window velas; devolve [] se dados insuficientes.
+function calcularRSIArray(candles, period, window) {
+  if (!candles || candles.length < period + window) return [];
+  const closes = candles.map(c => parseFloat(c.close));
+  // Calcula ganhos/perdas
+  const deltas = [];
+  for (let i = 1; i < closes.length; i++) {
+    deltas.push(closes[i] - closes[i - 1]);
+  }
+  // Média inicial (SMA) para o primeiro valor
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 0; i < period; i++) {
+    if (deltas[i] > 0) avgGain += deltas[i];
+    else avgLoss += Math.abs(deltas[i]);
+  }
+  avgGain /= period;
+  avgLoss /= period;
+
+  const rsiArr = [];
+  // Primeiro RSI
+  const rs0 = avgLoss === 0 ? Infinity : avgGain / avgLoss;
+  rsiArr.push(avgLoss === 0 ? 100 : 100 - 100 / (1 + rs0));
+
+  // Wilder smoothing para o resto
+  for (let i = period; i < deltas.length; i++) {
+    const gain = deltas[i] > 0 ? deltas[i] : 0;
+    const loss = deltas[i] < 0 ? Math.abs(deltas[i]) : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    const rs = avgLoss === 0 ? Infinity : avgGain / avgLoss;
+    rsiArr.push(avgLoss === 0 ? 100 : 100 - 100 / (1 + rs));
+  }
+
+  // Devolve apenas as últimas `window` entradas
+  return rsiArr.slice(-window);
+}
+
 // [RETIFICADO] Encerramento gracioso em vez de manter vivo indefinidamente
 let isShuttingDown = false;
 function gracefulShutdown(signal, err) {
@@ -127,14 +209,13 @@ if (process.env.REDIS_URL) {
 }
 
 const TRADING_MODES = {
-  'SNIPER':   { timeframes: ['M1', 'M5', 'M15'],         description: 'Entradas cirúrgicas de 1-15 minutos' },
-  'CAÇADOR':  { timeframes: ['M5', 'M15', 'H1'],          description: 'Ondas médias de 15-60 minutos' },
-  'PESCADOR': { timeframes: ['M15', 'H1', 'H4', 'H24'],   description: 'Grandes movimentos de horas a dias' }
+  'CAÇADOR':  { timeframes: ['M1', 'M5', 'M15', 'H1'],          description: 'Entradas rápidas de 5-15 minutos' },
+  'PESCADOR': { timeframes: ['M5', 'M15', 'H1', 'H4', 'H24'],   description: 'Grandes movimentos de horas a dias' }
 };
 
 // [RETIFICADO] Corrigida inconsistência de string: CAÇADOR com cedilha
 function getATRTimeframeByMode(mode) {
-  const map = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+  const map = { 'CAÇADOR': 'M1', 'PESCADOR': 'M5' };
   return map[mode] || 'M5';
 }
 
@@ -179,9 +260,9 @@ async function getCandlesWithCache(client, symbol, tf, mode, forceFresh = false,
   let ttl = ttlOverride !== null ? ttlOverride : getTTLAlignedToCandle(tf.seconds);
   const tipoAtivo = detectTipoAtivo(symbol);
   const isAtivoPulso = ['boom_index','crash_index','jump_index','step_index'].includes(tipoAtivo);
-  if (isAtivoPulso && mode === 'SNIPER' && tf.key === 'M1') {
+  if (isAtivoPulso && mode === 'CAÇADOR' && tf.key === 'M1') {
     ttl = Math.min(ttl, 10);
-    console.log(`⚡ TTL reduzido para ${ttl}s (ativo de pulso + SNIPER)`);
+    console.log(`⚡ TTL reduzido para ${ttl}s (ativo de pulso + CAÇADOR)`);
   }
   // 1. Tenta cache em memória
   if (!forceFresh) {
@@ -506,22 +587,18 @@ const RSI_LIMITS_BY_ASSET = {
 // ========== RSI LIMITS DINÂMICOS POR ATIVO + MODO ==========
 const RSI_PULSO_LIMITS = {
   'boom_index': {
-    'SNIPER':   { callMax: 55, callMin: 35, putOSell: 35, putOBuy: 68 },
     'CAÇADOR':  { callMax: 60, callMin: 40, putOSell: 35, putOBuy: 68 },
     'PESCADOR': { callMax: 65, callMin: 45, putOSell: 35, putOBuy: 68 }
   },
   'crash_index': {
-    'SNIPER':   { callMax: 65, callMin: 45, putOSell: 32, putOBuy: 62 },
     'CAÇADOR':  { callMax: 60, callMin: 40, putOSell: 32, putOBuy: 62 },
     'PESCADOR': { callMax: 55, callMin: 35, putOSell: 32, putOBuy: 62 }
   },
   'jump_index': {
-    'SNIPER':   { callMax: 60, callMin: 40, putOSell: 40, putOBuy: 60 },
     'CAÇADOR':  { callMax: 55, callMin: 45, putOSell: 40, putOBuy: 60 },
     'PESCADOR': { callMax: 60, callMin: 40, putOSell: 40, putOBuy: 60 }
   },
   'step_index': {
-    'SNIPER':   { callMax: 58, callMin: 38, putOSell: 40, putOBuy: 58 },
     'CAÇADOR':  { callMax: 60, callMin: 40, putOSell: 40, putOBuy: 58 },
     'PESCADOR': { callMax: 62, callMin: 42, putOSell: 40, putOBuy: 58 }
   }
@@ -671,7 +748,7 @@ function detectarPulsoRecente(candles, tipoAtivo) {
 
 // [RETIFICADO] tradeAnalyzer agora é criado dinamicamente dentro da função
 function calcularStopTakePorModo(candlesMap, mode, timing, tipoAtivo) {
-    const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+    const PRIMARY_TF_BY_MODE = { 'CAÇADOR': 'M1', 'PESCADOR': 'M5' };
     const primaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
     if (!primaryTf || !timing || !timing.permitido) return null;
   
@@ -730,6 +807,177 @@ function calcularPontoFranco(mtfManager, tipoAtivo) {
   return null;
 }
 
+// ========== FUNÇÕES DE SCORE POR MODO (CAÇADOR E PESCADOR) ==========
+function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
+  const reasons = [];
+  let score = 0;
+
+  const tf  = (key) => mtfManager.timeframes[key]?.analysis;
+  const cvs = (key) => candlesMap[key];
+
+  // Verificar disponibilidade mínima
+  if (!tf('H1') || !tf('M15') || !tf('M5') || !tf('M1') ||
+      !cvs('H1') || !cvs('M15') || !cvs('M5') || !cvs('M1')) {
+    return { signal: 'HOLD', confidence: 0, reasons: ['Dados insuficientes'], simpleMajority: { signal: 'HOLD' }, score: 0 };
+  }
+
+  // Direção definida pelo H1 via EMA
+  const trendH1 = trendDirection(cvs('H1'));
+  if (trendH1 === 'FLAT') {
+    reasons.push('H1 sem tendência clara (EMA9/EMA21)');
+    return { signal: 'HOLD', confidence: 0, reasons, simpleMajority: { signal: 'HOLD' }, score: 0 };
+  }
+  const dir          = trendH1;                          // 'UP' ou 'DOWN'
+  const signalTarget = dir === 'UP' ? 'CALL' : 'PUT';
+  const dirInverse   = dir === 'UP' ? 'DOWN' : 'UP';
+
+  // 1. H1: ADX > 25 e RSI entre 40-65
+  const h1 = tf('H1');
+  if (h1.adx <= 25) {
+    reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 25)`);
+  } else if (h1.rsi < 40 || h1.rsi > 65) {
+    reasons.push(`H1 RSI fora de 40-65 (${h1.rsi.toFixed(1)})`);
+  } else {
+    score += 25;
+    reasons.push(`✅ H1 tendência ${dir} (ADX ${h1.adx.toFixed(1)}, RSI ${h1.rsi.toFixed(1)})`);
+  }
+
+  // 2. M15: alinhamento com H1 + ADX > 20
+  const trendM15 = trendDirection(cvs('M15'));
+  const m15 = tf('M15');
+  if (trendM15 !== dir) {
+    reasons.push(`M15 tendência desalinhada (${trendM15})`);
+  } else if (m15.adx <= 20) {
+    reasons.push(`M15 ADX fraco (${m15.adx.toFixed(1)} ≤ 20)`);
+  } else {
+    score += 20;
+    reasons.push(`✅ M15 alinhado ${dir} (ADX ${m15.adx.toFixed(1)})`);
+  }
+
+  // 3. M5: RSI < 45 (CALL) ou > 55 (PUT) — pullback
+  const m5 = tf('M5');
+  const m5PullbackOk = dir === 'UP' ? m5.rsi < 45 : m5.rsi > 55;
+  if (!m5PullbackOk) {
+    reasons.push(`M5 RSI sem pullback (${m5.rsi.toFixed(1)})`);
+  } else {
+    score += 20;
+    reasons.push(`✅ M5 pullback (RSI ${m5.rsi.toFixed(1)})`);
+  }
+
+  // 4. M1: vela de reversão + RSI a sair de zona crítica (cálculo real com histórico)
+  const m1        = tf('M1');
+  const rsiM1     = m1 ? m1.rsi : 50;
+  const threshold = dir === 'UP' ? 35 : 65;
+  const reversal  = isReversalCandle(cvs('M1'), dir);
+
+  // Calcula as últimas 3 amostras de RSI(14) a partir dos candles do M1
+  const rsiHistM1  = calcularRSIArray(cvs('M1'), 14, 3);
+  // rsiLeaving verifica se o RSI anterior estava dentro da zona E agora saiu
+  const rsiExited  = rsiHistM1.length >= 2
+    ? rsiLeaving(rsiHistM1, threshold, dir)
+    : (dir === 'UP' ? rsiM1 > threshold : rsiM1 < threshold); // fallback se candles insuficientes
+
+  if (!reversal) {
+    reasons.push(`M1 sem vela de reversão ${dir === 'UP' ? 'altista' : 'baixista'}`);
+  } else if (!rsiExited) {
+    reasons.push(`M1 RSI não saiu da zona crítica (atual ${rsiM1.toFixed(0)}, threshold ${threshold})`);
+  } else {
+    score += 25;
+    reasons.push(`✅ M1 reversão + RSI saiu de zona (${rsiM1.toFixed(0)} > ${threshold})`);
+  }
+
+  const finalSignal = score >= 80 ? signalTarget : 'HOLD';
+  const confidence  = score >= 80 ? Math.min(score / 100, 0.99) : 0;
+  console.log(`🏹 CAÇADOR Score: ${score}/100 → ${finalSignal} (conf ${(confidence * 100).toFixed(0)}%)`);
+  return {
+    signal: finalSignal,
+    confidence,
+    reasons,
+    simpleMajority: { signal: finalSignal, confidence },
+    score
+  };
+}
+
+function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
+  const reasons = [];
+  let score = 0;
+
+  const tf  = (key) => mtfManager.timeframes[key]?.analysis;
+  const cvs = (key) => candlesMap[key];
+
+  // Verificar disponibilidade mínima
+  if (!tf('H24') || !tf('H4') || !tf('H1') || !tf('M15') || !tf('M5') ||
+      !cvs('H24') || !cvs('H4') || !cvs('H1') || !cvs('M15') || !cvs('M5')) {
+    return { signal: 'HOLD', confidence: 0, reasons: ['Dados insuficientes'], simpleMajority: { signal: 'HOLD' }, score: 0 };
+  }
+
+  // Alinhamento dos 3 TFs maiores
+  const trendD1 = trendDirection(cvs('H24'));  // H24 representa o diário
+  const trendH4 = trendDirection(cvs('H4'));
+  const trendH1 = trendDirection(cvs('H1'));
+
+  if (trendD1 === 'FLAT' || trendH4 !== trendD1 || trendH1 !== trendD1) {
+    reasons.push(`TFs maiores desalinhados (D1:${trendD1} H4:${trendH4} H1:${trendH1})`);
+    return { signal: 'HOLD', confidence: 0, reasons, simpleMajority: { signal: 'HOLD' }, score: 0 };
+  }
+
+  const dir          = trendD1;
+  const signalTarget = dir === 'UP' ? 'CALL' : 'PUT';
+  score += 35;
+  reasons.push(`✅ D1+H4+H1 alinhados em ${dir}`);
+
+  // H1: ADX > 25
+  const h1 = tf('H1');
+  if (h1.adx <= 25) {
+    reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 25)`);
+  } else {
+    score += 20;
+    reasons.push(`✅ H1 ADX forte (${h1.adx.toFixed(1)})`);
+  }
+
+  // M15: pullback — RSI < 45 (CALL) ou > 55 (PUT)
+  const m15 = tf('M15');
+  const m15PullbackOk = dir === 'UP' ? m15.rsi < 45 : m15.rsi > 55;
+  if (!m15PullbackOk) {
+    reasons.push(`M15 RSI sem pullback (${m15.rsi.toFixed(1)})`);
+  } else {
+    score += 15;
+    reasons.push(`✅ M15 pullback (RSI ${m15.rsi.toFixed(1)})`);
+  }
+
+  // M5: vela de reversão + RSI a sair de zona (<40 CALL, >60 PUT) — cálculo real com histórico
+  const m5         = tf('M5');
+  const rsiM5      = m5 ? m5.rsi : 50;
+  const thresholdM5 = dir === 'UP' ? 40 : 60;
+  const reversal    = isReversalCandle(cvs('M5'), dir);
+
+  // Calcula as últimas 3 amostras de RSI(14) a partir dos candles do M5
+  const rsiHistM5  = calcularRSIArray(cvs('M5'), 14, 3);
+  const rsiExited  = rsiHistM5.length >= 2
+    ? rsiLeaving(rsiHistM5, thresholdM5, dir)
+    : (dir === 'UP' ? rsiM5 > thresholdM5 : rsiM5 < thresholdM5); // fallback
+
+  if (!reversal) {
+    reasons.push(`M5 sem vela de reversão ${dir === 'UP' ? 'altista' : 'baixista'}`);
+  } else if (!rsiExited) {
+    reasons.push(`M5 RSI não saiu da zona (atual ${rsiM5.toFixed(0)}, threshold ${thresholdM5})`);
+  } else {
+    score += 20;
+    reasons.push(`✅ M5 reversão + RSI saiu de zona (${rsiM5.toFixed(0)} > ${thresholdM5})`);
+  }
+
+  const finalSignal = score >= 85 ? signalTarget : 'HOLD';
+  const confidence  = score >= 85 ? Math.min(score / 100, 0.99) : 0;
+  console.log(`🎣 PESCADOR Score: ${score}/100 → ${finalSignal} (conf ${(confidence * 100).toFixed(0)}%)`);
+  return {
+    signal: finalSignal,
+    confidence,
+    reasons,
+    simpleMajority: { signal: finalSignal, confidence },
+    score
+  };
+}
+
 app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => {
   const startTime = Date.now();
 
@@ -740,7 +988,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     if (!symbol || typeof symbol !== 'string' || symbol.length > 20 || !/^[A-Za-z0-9_]+$/.test(symbol)) {
       return res.status(400).json({ error: 'Símbolo inválido ou não permitido' });
     }
-    if (!mode || !TRADING_MODES[mode]) return res.status(400).json({ error: 'Modo inválido. Use: SNIPER, CAÇADOR ou PESCADOR', availableModes: Object.keys(TRADING_MODES) });
+    if (!mode || !TRADING_MODES[mode]) return res.status(400).json({ error: 'Modo inválido. Use: CAÇADOR ou PESCADOR', availableModes: Object.keys(TRADING_MODES) });
 
     console.log(`\n🎯 ${mode} | ${symbol}`);
 
@@ -824,36 +1072,52 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       })
     );
 
-    const consolidated = mtfManager.consolidateSignals();
-    // ADICIONAR APÓS:
+    // ========== CONSOLIDAÇÃO BASEADA EM SCORE (substitui consolidateSignals genérico) ==========
+    let consolidated;
+    if (mode === 'CAÇADOR') {
+      consolidated = calcularScoreCacador(candlesMap, mtfManager, tipoAtivo);
+    } else if (mode === 'PESCADOR') {
+      consolidated = calcularScorePescador(candlesMap, mtfManager, tipoAtivo);
+    } else {
+      // fallback de segurança (não esperado com apenas 2 modos)
+      consolidated = mtfManager.consolidateSignals();
+    }
+    // Garantir campos que o resto do código espera
+    consolidated.tipo_ativo    = tipoAtivo;
+    consolidated.sinal_premium = consolidated.signal || null;
+    // simpleMajority já é preenchido pelas funções de score
+
+    // Ponto franco (mantém lógica existente)
     const pontoFranco = calcularPontoFranco(mtfManager, tipoAtivo);
     if (pontoFranco) {
       consolidated.ponto_franco = pontoFranco;
       console.log(`⚡ ${pontoFranco.tipo} detectado!`);
     }
-    const agreement    = mtfManager.calculateAgreement();
-    consolidated.tipo_ativo = tipoAtivo;
 
+    // Agreement simplificado baseado no score
+    const agreement = {
+      agreement: consolidated.score != null ? `${consolidated.score}/100` : 'N/A',
+      primarySignal: consolidated.signal,
+      callCount: consolidated.signal === 'CALL' ? 1 : 0,
+      putCount:  consolidated.signal === 'PUT'  ? 1 : 0,
+      totalTimeframes: TRADING_MODES[mode].timeframes.length
+    };
+    // Mantém callCountDiv/putCountDiv para as verificações de divergência abaixo
     const timeframesSignals = modeTimeframes
       .map(tfKey => mtfManager.timeframes[tfKey]?.analysis?.sinal)
       .filter(s => s && s !== 'HOLD');
     const callCountDiv = timeframesSignals.filter(s => s === 'CALL').length;
     const putCountDiv  = timeframesSignals.filter(s => s === 'PUT').length;
 
-    if (callCountDiv > 0 && putCountDiv > 0) {
-      console.log(`⚠️ Divergência TF: ${callCountDiv}C vs ${putCountDiv}P → HOLD`);
-      consolidated.simpleMajority.signal = 'HOLD';
-      consolidated.signal = 'HOLD';
-      consolidated.confidence = Math.min(consolidated.confidence, 0.3);
-    }
-    
-
+    // Nota: a divergência de TFs já é tratada internamente pelas funções de score
+    // (trendDirection + alinhamento de EMAs). O bloco abaixo é mantido apenas como
+    // filtro extra de segurança para divergências MACD detectadas pelo sistema base.
     let hasMacdDivergence = false;
     for (const tfKey of modeTimeframes) {
       const a = mtfManager.timeframes[tfKey]?.analysis;
       if (a?.divergencia_macd?.divergencia) {
         hasMacdDivergence = true;
-        console.log(`⚠️ Divergência MACD em ${tfKey} → HOLD`);
+        console.log(`⚠️ Divergência MACD em ${tfKey} → forçar HOLD`);
         break;
       }
     }
@@ -863,7 +1127,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
       consolidated.confidence = Math.min(consolidated.confidence, 0.3);
     }
 
-    const PRIMARY_TF_MAP = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+    const PRIMARY_TF_MAP = { 'CAÇADOR': 'M1', 'PESCADOR': 'M5' };
     const primaryTf = PRIMARY_TF_MAP[mode] || 'M5';
 
     const primaryCandles = candlesMap[primaryTf];
@@ -910,7 +1174,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
     console.log(`🕯️  Open ${primaryTf}: ${candleOpenPrice} | 💰 Atual: ${currentPrice} | ${priceMovedDirection} ${priceMovedFromOpen}`);
 
-    const PRIMARY_TF_BY_MODE = { 'SNIPER': 'M1', 'CAÇADOR': 'M5', 'PESCADOR': 'M15' };
+    const PRIMARY_TF_BY_MODE = { 'CAÇADOR': 'M1', 'PESCADOR': 'M5' };
     const modePrimaryTf = PRIMARY_TF_BY_MODE[mode] || 'M5';
     const allTfsAgree = callCountDiv === modeTimeframes.length || putCountDiv === modeTimeframes.length;
     // Alerta informativo – sem penalizar confiança
@@ -923,7 +1187,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     
     let primaryTrendNote = null;
     if (consolidated.signal === 'HOLD') {
-        const trendTFMap = { 'SNIPER': 'M15', 'CAÇADOR': 'H1', 'PESCADOR': 'H24' };
+        const trendTFMap = { 'CAÇADOR': 'H1', 'PESCADOR': 'H24' };
         let tfKey = trendTFMap[mode];
         if (mode === 'PESCADOR') {
             const h24 = mtfManager.timeframes['H24']?.analysis;
@@ -951,7 +1215,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
     const analiseRefinadaPromise = (async () => {
       try {
-        const modeMap = { 'SNIPER': 'SNIPER', 'CAÇADOR': 'CACADOR', 'PESCADOR': 'PESCADOR' };
+        const modeMap = { 'CAÇADOR': 'CACADOR', 'PESCADOR': 'PESCADOR' };
         const dadosMercado = {
           ativo: symbol, precoAtual: currentPrice, volume: 0,
           precosHistoricos: historicalCandles || [], timeframes: {}
@@ -997,9 +1261,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
     if (consolidated.signal !== 'HOLD') {
         const modeTimingMap = {
-            'SNIPER': m1Timing,
-            'CAÇADOR': m5Timing,
-            'PESCADOR': m15Timing
+            'CAÇADOR': m1Timing,
+            'PESCADOR': m5Timing
         };
         const primaryTiming = modeTimingMap[mode];
 
@@ -1032,9 +1295,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
     const isAtivoPulso = ['boom_index','crash_index','jump_index','step_index'].includes(tipoAtivo);
     const hasTfDivergenceForLiquidity = callCountDiv > 0 && putCountDiv > 0;
     let timingOk = false;
-    if (mode === 'SNIPER'   && m1Timing?.permitido)  timingOk = true;
-    if (mode === 'CAÇADOR'  && m5Timing?.permitido)  timingOk = true;
-    if (mode === 'PESCADOR' && m15Timing?.permitido) timingOk = true;
+    if (mode === 'CAÇADOR'  && m1Timing?.permitido)  timingOk = true;
+    if (mode === 'PESCADOR' && m5Timing?.permitido)  timingOk = true;
 
    if (!isAtivoPulso && !hasTfDivergenceForLiquidity && 
     liquidityResult.sweepDetected && liquidityResult.confidence >= 75 && timingOk) {
@@ -1049,9 +1311,8 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 }
     // Obter o timing correspondente ao modo atual
     const modeTiming = (() => {
-        if (mode === 'SNIPER') return m1Timing;
-        if (mode === 'CAÇADOR') return m5Timing;
-        if (mode === 'PESCADOR') return m15Timing;
+        if (mode === 'CAÇADOR') return m1Timing;
+        if (mode === 'PESCADOR') return m5Timing;
         return null;
     })();
     
@@ -1097,7 +1358,9 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
         ponto_franco: consolidated.ponto_franco || null,
         timing_especial: timingEspecial,
         primaryTrendNote: primaryTrendNote || null,
-        timingRiskWarning: timingRiskWarning || null
+        timingRiskWarning: timingRiskWarning || null,
+        score: consolidated.score ?? null,
+        score_reasons: consolidated.reasons || []
       },
       agreement: {
         agreement: agreement.agreement, primarySignal: agreement.primarySignal,
@@ -1170,12 +1433,15 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🔌 FIX: optional chaining em analise.sinal ativo`);
   console.log(`⏱️  FIX: timeout getCandles reduzido para 12s`);
   console.log(`🔒 FIX: Cache Redis com validação JSON e LRU em memória`);
-  console.log(`⚡ TTL reduzido para ativos de pulso no SNIPER (10s max)`);
+  console.log(`⚡ TTL reduzido para ativos de pulso no CAÇADOR (10s max)`);
   console.log(`🎯 RSI dinâmico por modo implementado`);
   console.log(`💠 Stop Loss dinâmico: 2% pulso / 0.2% normal`);
   console.log(`🛡️  Override de liquidez bloqueado em ativos de pulso`);
   console.log(`👁️  Detecção de pulso recente ativa`);
   console.log(`⚡ Ponto Franco calculado automaticamente`);
+  console.log(`🏹 CAÇADOR: M1+M5+M15+H1 | TF primário M1 | expiração 5-15 min`);
+  console.log(`🎣 PESCADOR: M5+M15+H1+H4+H24 | TF primário M5 | expiração 15-60 min`);
+  console.log(`🎯 Score CAÇADOR: limiar ≥80 | Score PESCADOR: limiar ≥85`);
   try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
   catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
