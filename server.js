@@ -851,7 +851,8 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
     reasons.push(`M15 ADX fraco (${m15.adx.toFixed(1)} ≤ 20)`);
   } else {
     const m15Phase = m15.macd_phase?.name || '';
-    const isWeak = m15Phase.startsWith('WEAK'); // WEAK_BULL ou WEAK_BEAR
+    const  = m15Phase.startsWith('WEAK'); // WEAK_BULL ou WEAK_BEAR
+    console.log(`[DEBUG] M15 Phase: "${m15Phase}", isWeak: ${isWeak}`);  // ← Adiciona aqui
     if (isWeak) {
       score += 10;
       reasons.push(`⚠️ M15 alinhado ${dir} mas MACD enfraquecendo (ADX ${m15.adx.toFixed(1)}) → +10 pts`);
