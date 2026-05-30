@@ -842,7 +842,7 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
     reasons.push(`✅ H1 tendência ${dir} (ADX ${h1.adx.toFixed(1)}, RSI ${h1.rsi.toFixed(1)})`);
   }
 
-  // 2. M15: alinhamento com H1 + ADX > 20
+   // 2. M15: alinhamento com H1 + ADX > 20 (com penalização se MACD fraco)
   const trendM15 = trendDirection(cvs('M15'));
   const m15 = tf('M15');
   if (trendM15 !== dir) {
@@ -850,10 +850,16 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
   } else if (m15.adx <= 20) {
     reasons.push(`M15 ADX fraco (${m15.adx.toFixed(1)} ≤ 20)`);
   } else {
-    score += 20;
-    reasons.push(`✅ M15 alinhado ${dir} (ADX ${m15.adx.toFixed(1)})`);
+    const m15Phase = m15.macd_phase?.name || '';
+    const isWeak = m15Phase.startsWith('WEAK'); // WEAK_BULL ou WEAK_BEAR
+    if (isWeak) {
+      score += 10;
+      reasons.push(`⚠️ M15 alinhado ${dir} mas MACD enfraquecendo (ADX ${m15.adx.toFixed(1)}) → +10 pts`);
+    } else {
+      score += 20;
+      reasons.push(`✅ M15 alinhado ${dir} (ADX ${m15.adx.toFixed(1)})`);
+    }
   }
-
   // 3. M5: RSI < 45 (CALL) ou > 55 (PUT) — pullback
   const m5 = tf('M5');
   const m5PullbackOk = dir === 'UP' ? m5.rsi < 45 : m5.rsi > 55;
@@ -935,14 +941,21 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
     reasons.push(`✅ H1 ADX forte (${h1.adx.toFixed(1)})`);
   }
 
-  // M15: pullback — RSI < 45 (CALL) ou > 55 (PUT)
+   // M15: pullback — RSI < 45 (CALL) ou > 55 (PUT) — penalização se MACD fraco
   const m15 = tf('M15');
   const m15PullbackOk = dir === 'UP' ? m15.rsi < 45 : m15.rsi > 55;
   if (!m15PullbackOk) {
     reasons.push(`M15 RSI sem pullback (${m15.rsi.toFixed(1)})`);
   } else {
-    score += 15;
-    reasons.push(`✅ M15 pullback (RSI ${m15.rsi.toFixed(1)})`);
+    const m15Phase = m15.macd_phase?.name || '';
+    const isWeak = m15Phase.startsWith('WEAK');
+    if (isWeak) {
+      score += 8;
+      reasons.push(`⚠️ M15 pullback (RSI ${m15.rsi.toFixed(1)}) mas MACD enfraquecendo → +8 pts`);
+    } else {
+      score += 15;
+      reasons.push(`✅ M15 pullback (RSI ${m15.rsi.toFixed(1)})`);
+    }
   }
 
   // M5: vela de reversão + RSI a sair de zona (<40 CALL, >60 PUT) — cálculo real com histórico
