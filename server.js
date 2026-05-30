@@ -1228,7 +1228,7 @@ app.post('/api/analyze', authenticateToken, analyzeLimiter, async (req, res) => 
 
     const analiseRefinadaPromise = (async () => {
       try {
-        const modeMap = { 'CAÇADOR': 'CACADOR', 'PESCADOR': 'PESCADOR' };
+const modeMap = { 'CAÇADOR': 'CAÇADOR', 'PESCADOR': 'PESCADOR' };
         const dadosMercado = {
           ativo: symbol, precoAtual: currentPrice, volume: 0,
           precosHistoricos: historicalCandles || [], timeframes: {}
