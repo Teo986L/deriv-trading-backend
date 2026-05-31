@@ -573,7 +573,7 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
 
 // ========== RSI LIMITS POR TIPO DE ATIVO ==========
 const RSI_LIMITS_BY_ASSET = {
-  'forex':           { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 30 },
+  'forex':           { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 35 },
   'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20 },
   'commodity':       { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25 },
   'criptomoeda':     { pullback: 30, extremo: 25, sobrecompra: 80, sobrevenda: 20 },
