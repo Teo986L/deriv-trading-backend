@@ -933,7 +933,7 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
   }
 
   // Alinhamento dos 3 TFs maiores
-  const trendD1 = trendDirection(cvs('H24'));  // H24 representa o diário
+  const trendD1 = trendDirection(cvs('H24'));
   const trendH4 = trendDirection(cvs('H4'));
   const trendH1 = trendDirection(cvs('H1'));
 
@@ -947,7 +947,10 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
   score += 35;
   reasons.push(`✅ D1+H4+H1 alinhados em ${dir}`);
 
-  // H1: ADX > 25
+  // Obter limites dinâmicos do ativo
+  const limiteAtivo = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
+
+  // H1: ADX > 22
   const h1 = tf('H1');
   if (h1.adx <= 22) {
     reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 22)`);
@@ -956,14 +959,19 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
     reasons.push(`✅ H1 ADX forte (${h1.adx.toFixed(1)})`);
   }
 
-   // M15: pullback — RSI < 45 (CALL) ou > 55 (PUT) — penalização se MACD fraco
+  // M15: pullback dinâmico – (50 + extremo)/2, com penalização se MACD fraco
   const m15 = tf('M15');
-  const m15PullbackOk = dir === 'UP' ? m15.rsi < 45 : m15.rsi > 55;
+  const pullbackM15CallMax = Math.floor((50 + limiteAtivo.sobrevenda) / 2);
+  const pullbackM15PutMin  = Math.floor((50 + limiteAtivo.sobrecompra) / 2);
+  const m15PullbackOk = dir === 'UP'
+    ? m15.rsi < pullbackM15CallMax
+    : m15.rsi > pullbackM15PutMin;
+
   if (!m15PullbackOk) {
-    reasons.push(`M15 RSI sem pullback (${m15.rsi.toFixed(1)})`);
-   } else {
+    reasons.push(`M15 RSI sem pullback (${m15.rsi.toFixed(1)}, limiar ${dir === 'UP' ? pullbackM15CallMax : pullbackM15PutMin})`);
+  } else {
     const m15Phase = m15.macd_phase?.name || '';
-    const isWeak = m15Phase.includes('PERDENDO FORÇA');   // ← alterado
+    const isWeak = m15Phase.includes('PERDENDO FORÇA');
     console.log(`[DEBUG] M15 Phase: "${m15Phase}", isWeak: ${isWeak}`);
     if (isWeak) {
       score += 12;
@@ -974,17 +982,18 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
     }
   }
 
-  // M5: vela de reversão + RSI a sair de zona (<40 CALL, >60 PUT) — cálculo real com histórico
+  // M5: vela de reversão + RSI a sair de zona (thresholds dinâmicos)
   const m5         = tf('M5');
   const rsiM5      = m5 ? m5.rsi : 50;
-  const thresholdM5 = dir === 'UP' ? 35 : 55;
-  const reversal    = isReversalCandle(cvs('M5'), dir);
+  const reversal   = isReversalCandle(cvs('M5'), dir);
+  const thresholdM5 = dir === 'UP'
+    ? limiteAtivo.sobrevenda      // CALL: sair acima da sobrevenda
+    : limiteAtivo.sobrecompra;    // PUT: sair abaixo da sobrecompra
 
-  // Calcula as últimas 3 amostras de RSI(14) a partir dos candles do M5
-  const rsiHistM5  = calcularRSIArray(cvs('M5'), 14, 3);
-  const rsiExited  = rsiHistM5.length >= 2
+  const rsiHistM5 = calcularRSIArray(cvs('M5'), 14, 3);
+  const rsiExited = rsiHistM5.length >= 2
     ? rsiLeaving(rsiHistM5, thresholdM5, dir)
-    : (dir === 'UP' ? rsiM5 > thresholdM5 : rsiM5 < thresholdM5); // fallback
+    : (dir === 'UP' ? rsiM5 > thresholdM5 : rsiM5 < thresholdM5);
 
   if (!reversal) {
     reasons.push(`M5 sem vela de reversão ${dir === 'UP' ? 'altista' : 'baixista'}`);
@@ -992,7 +1001,7 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
     reasons.push(`M5 RSI não saiu da zona (atual ${rsiM5.toFixed(0)}, threshold ${thresholdM5})`);
   } else {
     score += 20;
-    reasons.push(`✅ M5 reversão + RSI saiu de zona (${rsiM5.toFixed(0)} > ${thresholdM5})`);
+    reasons.push(`✅ M5 reversão + RSI saiu de zona (${rsiM5.toFixed(0)} vs ${thresholdM5})`);
   }
 
   const finalSignal = score >= 80 ? signalTarget : 'HOLD';
