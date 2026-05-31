@@ -863,7 +863,11 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
   }
   // 3. M5: RSI < 45 (CALL) ou > 55 (PUT) — pullback
   const m5 = tf('M5');
-  const m5PullbackOk = dir === 'UP' ? m5.rsi < 45 : m5.rsi > 55;
+const m5Closes = cvs('M5');
+const m5RsiHist = calcularRSIArray(m5Closes, 14, 3);
+const m5PullbackOk = dir === 'UP'
+  ? m5.rsi < 50 || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] < 50)
+  : m5.rsi > 50 || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] > 50);
   if (!m5PullbackOk) {
     reasons.push(`M5 RSI sem pullback (${m5.rsi.toFixed(1)})`);
   } else {
@@ -963,7 +967,7 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
   // M5: vela de reversão + RSI a sair de zona (<40 CALL, >60 PUT) — cálculo real com histórico
   const m5         = tf('M5');
   const rsiM5      = m5 ? m5.rsi : 50;
-  const thresholdM5 = dir === 'UP' ? 40 : 60;
+  const thresholdM5 = dir === 'UP' ? 35 : 55;
   const reversal    = isReversalCandle(cvs('M5'), dir);
 
   // Calcula as últimas 3 amostras de RSI(14) a partir dos candles do M5
@@ -1456,7 +1460,7 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`⚡ Ponto Franco calculado automaticamente`);
   console.log(`🏹 CAÇADOR: M1+M5+M15+H1 | TF primário M5 | expiração 5-15 min`);
   console.log(`🎣 PESCADOR: M5+M15+H1+H4+H24 | TF primário M15 | expiração 15-60 min`);
-  console.log(`🎯 Score CAÇADOR: limiar ≥80 | Score PESCADOR: limiar ≥85`);
+  console.log(`🎯 Score CAÇADOR: limiar ≥75 | Score PESCADOR: limiar ≥80`);
   try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
   catch (err) { console.error('❌ Conexão Deriv:', err); }
 });
