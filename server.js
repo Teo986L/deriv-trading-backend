@@ -831,55 +831,56 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
   const signalTarget = dir === 'UP' ? 'CALL' : 'PUT';
   const dirInverse   = dir === 'UP' ? 'DOWN' : 'UP';
 
-  // 1. H1: ADX > 25 e RSI entre 40-65
-  const h1 = tf('H1');
-  if (h1.adx <= 22) {
-    reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 22)`);
-  } else if (h1.rsi < 40 || h1.rsi > 65) {
+  // 1. H1: ADX > 18 e RSI entre 40-65
+const h1 = tf('H1');
+if (h1.adx <= 18) {
+    reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 18)`);
+} else if (h1.rsi < 40 || h1.rsi > 65) {
     reasons.push(`H1 RSI fora de 40-65 (${h1.rsi.toFixed(1)})`);
-  } else {
+} else {
     score += 22;
     reasons.push(`✅ H1 tendência ${dir} (ADX ${h1.adx.toFixed(1)}, RSI ${h1.rsi.toFixed(1)})`);
-  }
+}
 
-   // 2. M15: alinhamento com H1 + ADX > 20 (com penalização se MACD fraco)
-  const trendM15 = trendDirection(cvs('M15'));
-  const m15 = tf('M15');
-  if (trendM15 !== dir) {
+// 2. M15: alinhamento com H1 + ADX > 18 (com penalização se MACD fraco)
+const trendM15 = trendDirection(cvs('M15'));
+const m15 = tf('M15');
+if (trendM15 !== dir) {
     reasons.push(`M15 tendência desalinhada (${trendM15})`);
-  } else if (m15.adx <= 20) {
-    reasons.push(`M15 ADX fraco (${m15.adx.toFixed(1)} ≤ 20)`);
-    } else {
+} else if (m15.adx <= 18) {
+    reasons.push(`M15 ADX fraco (${m15.adx.toFixed(1)} ≤ 18)`);
+} else {
     const m15Phase = m15.macd_phase?.name || '';
-    const isWeak = m15Phase.includes('PERDENDO FORÇA');   // ← alterado
+    const isWeak = m15Phase.includes('PERDENDO FORÇA');
     console.log(`[DEBUG] M15 Phase: "${m15Phase}", isWeak: ${isWeak}`);
     if (isWeak) {
-      score += 15;
-      reasons.push(`⚠️ M15 alinhado ${dir} mas MACD enfraquecendo (ADX ${m15.adx.toFixed(1)}) → +15 pts`);
+        score += 15;
+        reasons.push(`⚠️ M15 alinhado ${dir} mas MACD enfraquecendo (ADX ${m15.adx.toFixed(1)}) → +15 pts`);
     } else {
-      score += 20;
-      reasons.push(`✅ M15 alinhado ${dir} (ADX ${m15.adx.toFixed(1)})`);
+        score += 20;
+        reasons.push(`✅ M15 alinhado ${dir} (ADX ${m15.adx.toFixed(1)})`);
     }
-  }
-  // 3. M5: RSI < 45 (CALL) ou > 55 (PUT) — pullback
-  const m5 = tf('M5');
+}
+
+// 3. M5: RSI < 45 (CALL) ou > 45 (PUT) — pullback
+const m5 = tf('M5');
 const m5Closes = cvs('M5');
 const m5RsiHist = calcularRSIArray(m5Closes, 14, 3);
 const m5PullbackOk = dir === 'UP'
-  ? m5.rsi < 50 || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] < 50)
-  : m5.rsi > 50 || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] > 50);
-  if (!m5PullbackOk) {
+  ? m5.rsi < 45 || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] < 45)
+  : m5.rsi > 45 || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] > 45);
+if (!m5PullbackOk) {
     reasons.push(`M5 RSI sem pullback (${m5.rsi.toFixed(1)})`);
-  } else {
+} else {
     score += 20;
     reasons.push(`✅ M5 pullback (RSI ${m5.rsi.toFixed(1)})`);
-  }
+}
 
-  // 4. M1: vela de reversão + RSI a sair de zona crítica (cálculo real com histórico)
-  const m1        = tf('M1');
-  const rsiM1     = m1 ? m1.rsi : 50;
-  const threshold = dir === 'UP' ? 35 : 65;
-  const reversal  = isReversalCandle(cvs('M1'), dir);
+// 4. M1: vela de reversão + RSI a sair de zona crítica (threshold 60 para PUT)
+const m1        = tf('M1');
+const rsiM1     = m1 ? m1.rsi : 50;
+const threshold = dir === 'UP' ? 35 : 60;   // ← alterado para 60
+const reversal  = isReversalCandle(cvs('M1'), dir);
 
   // Calcula as últimas 3 amostras de RSI(14) a partir dos candles do M1
   const rsiHistM1  = calcularRSIArray(cvs('M1'), 14, 3);
