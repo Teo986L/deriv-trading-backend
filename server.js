@@ -209,13 +209,13 @@ if (process.env.REDIS_URL) {
 }
 
 const TRADING_MODES = {
-  'CAÇADOR':  { timeframes: ['M1', 'M5', 'M15', 'H1'],          description: 'Entradas rápidas de 5-15 minutos' },
+  'CAÇADOR':  { timeframes: ['M5', 'M15', 'H1'],          description: 'Entradas rápidas de 5-15 minutos' },
   'PESCADOR': { timeframes: ['M5', 'M15', 'H1', 'H4', 'H24'],   description: 'Grandes movimentos de horas a dias' }
 };
 
 // [RETIFICADO] Corrigida inconsistência de string: CAÇADOR com cedilha
 function getATRTimeframeByMode(mode) {
-  const map = { 'CAÇADOR': 'M1', 'PESCADOR': 'M5' };
+  const map = { 'CAÇADOR': 'M5', 'PESCADOR': 'M5' };
   return map[mode] || 'M5';
 }
 
@@ -1280,8 +1280,7 @@ const modeMap = { 'CAÇADOR': 'CAÇADOR', 'PESCADOR': 'PESCADOR' };
       }
     })();
 
-    let m1Timing = null, m5Timing = null, m15Timing = null, h1Timing = null, h4Timing = null;
-    if (modeTimeframes.includes('M1'))  m1Timing  = calcularTimingM1(mtfManager.timeframes['M1']?.analysis,  primarySignal, mode);
+    let m5Timing = null, m15Timing = null, h1Timing = null, h4Timing = null;
     if (modeTimeframes.includes('M5'))  m5Timing  = calcularTimingM5(mtfManager.timeframes['M5']?.analysis,  primarySignal, mode);
     if (modeTimeframes.includes('M15')) m15Timing = calcularTimingM15(mtfManager.timeframes['M15']?.analysis, primarySignal, mode);
     // [RETIFICADO] Remover vírgula solta antes de mode
@@ -1477,7 +1476,7 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🛡️  Override de liquidez bloqueado em ativos de pulso`);
   console.log(`👁️  Detecção de pulso recente ativa`);
   console.log(`⚡ Ponto Franco calculado automaticamente`);
-  console.log(`🏹 CAÇADOR: M1+M5+M15+H1 | TF primário M5 | expiração 5-15 min`);
+  console.log(`🏹 CAÇADOR: M5+M15+H1 | TF primário M5 | expiração 5-15 min`);
   console.log(`🎣 PESCADOR: M5+M15+H1+H4+H24 | TF primário M15 | expiração 15-60 min`);
   console.log(`🎯 Score CAÇADOR: limiar ≥75 | Score PESCADOR: limiar ≥80`);
   try { await getDerivClient(); console.log('✅ Conexão Deriv OK'); }
