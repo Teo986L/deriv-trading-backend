@@ -1386,7 +1386,6 @@ const modeMap = { 'CAÇADOR': 'CAÇADOR', 'PESCADOR': 'PESCADOR' };
         priceMovedDirection,
         tipo_ativo: tipoAtivo,
         recentPulse: recentPulse || null,
-        ...(m1Timing  && { m1_timing:  m1Timing  }),
         ...(m5Timing  && { m5_timing:  m5Timing  }),
         ...(m15Timing && { m15_timing: m15Timing }),
         ...(h1Timing  && { h1_timing:  h1Timing  }),
