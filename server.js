@@ -574,14 +574,14 @@ app.get('/api/connection-status', authenticateToken, (req, res) => {
 // ========== RSI LIMITS POR TIPO DE ATIVO ==========
 const RSI_LIMITS_BY_ASSET = {
   'forex':           { pullback: 30, extremo: 25, sobrecompra: 70, sobrevenda: 35 },
-  'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 20 },
-  'commodity':       { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25 },
-  'criptomoeda':     { pullback: 30, extremo: 25, sobrecompra: 80, sobrevenda: 20 },
-  'indice_normal':   { pullback: 35, extremo: 30, sobrecompra: 75, sobrevenda: 25 },
-  'boom_index':      { pullback: 35, extremo: 30, sobrecompra: 85, sobrevenda: 20 },
-  'crash_index':     { pullback: 20, extremo: 15, sobrecompra: 80, sobrevenda: 15 },
-  'jump_index':      { pullback: 22, extremo: 18, sobrecompra: 82, sobrevenda: 18 },
-  'step_index':      { pullback: 32, extremo: 28, sobrecompra: 72, sobrevenda: 28 }
+  'volatility_index':{ pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 30 },  // ← alterado
+  'commodity':       { pullback: 35, extremo: 30, sobrecompra: 72, sobrevenda: 28 },  // ← alterado
+  'criptomoeda':     { pullback: 30, extremo: 25, sobrecompra: 75, sobrevenda: 25 },  // ← alterado
+  'indice_normal':   { pullback: 35, extremo: 30, sobrecompra: 72, sobrevenda: 28 },  // ← alterado
+  'boom_index':      { pullback: 35, extremo: 30, sobrecompra: 80, sobrevenda: 22 },  // ← alterado
+  'crash_index':     { pullback: 20, extremo: 15, sobrecompra: 78, sobrevenda: 18 },  // ← alterado
+  'jump_index':      { pullback: 22, extremo: 18, sobrecompra: 78, sobrevenda: 20 },  // ← alterado
+  'step_index':      { pullback: 32, extremo: 28, sobrecompra: 72, sobrevenda: 28 }   // mantido
 };
 
 // ========== RSI LIMITS DINÂMICOS POR ATIVO + MODO ==========
