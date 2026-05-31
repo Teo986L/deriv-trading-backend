@@ -833,12 +833,12 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
 
   // 1. H1: ADX > 25 e RSI entre 40-65
   const h1 = tf('H1');
-  if (h1.adx <= 25) {
-    reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 25)`);
+  if (h1.adx <= 22) {
+    reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 22)`);
   } else if (h1.rsi < 40 || h1.rsi > 65) {
     reasons.push(`H1 RSI fora de 40-65 (${h1.rsi.toFixed(1)})`);
   } else {
-    score += 25;
+    score += 22;
     reasons.push(`✅ H1 tendência ${dir} (ADX ${h1.adx.toFixed(1)}, RSI ${h1.rsi.toFixed(1)})`);
   }
 
@@ -935,8 +935,8 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
 
   // H1: ADX > 25
   const h1 = tf('H1');
-  if (h1.adx <= 25) {
-    reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 25)`);
+  if (h1.adx <= 22) {
+    reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 22)`);
   } else {
     score += 20;
     reasons.push(`✅ H1 ADX forte (${h1.adx.toFixed(1)})`);
