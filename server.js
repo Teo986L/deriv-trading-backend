@@ -816,8 +816,8 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
   const cvs = (key) => candlesMap[key];
 
   // Verificar disponibilidade mínima
-  if (!tf('H1') || !tf('M15') || !tf('M5') || !tf('M1') ||
-      !cvs('H1') || !cvs('M15') || !cvs('M5') || !cvs('M1')) {
+  if (!tf('H1') || !tf('M15') || !tf('M5') ||
+      !cvs('H1') || !cvs('M15') || !cvs('M5')) {
     return { signal: 'HOLD', confidence: 0, reasons: ['Dados insuficientes'], simpleMajority: { signal: 'HOLD' }, score: 0 };
   }
 
@@ -829,75 +829,84 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
   }
   const dir          = trendH1;                          // 'UP' ou 'DOWN'
   const signalTarget = dir === 'UP' ? 'CALL' : 'PUT';
-  const dirInverse   = dir === 'UP' ? 'DOWN' : 'UP';
 
   // 1. H1: ADX > 18 e RSI entre 40-65
-const h1 = tf('H1');
-if (h1.adx <= 18) {
+  const h1 = tf('H1');
+  if (h1.adx <= 18) {
     reasons.push(`H1 ADX fraco (${h1.adx.toFixed(1)} ≤ 18)`);
-} else if (h1.rsi < 40 || h1.rsi > 65) {
+  } else if (h1.rsi < 40 || h1.rsi > 65) {
     reasons.push(`H1 RSI fora de 40-65 (${h1.rsi.toFixed(1)})`);
-} else {
+  } else {
     score += 22;
     reasons.push(`✅ H1 tendência ${dir} (ADX ${h1.adx.toFixed(1)}, RSI ${h1.rsi.toFixed(1)})`);
-}
+  }
 
-// 2. M15: alinhamento com H1 + ADX > 18 (com penalização se MACD fraco)
-const trendM15 = trendDirection(cvs('M15'));
-const m15 = tf('M15');
-if (trendM15 !== dir) {
+  // 2. M15: alinhamento com H1 + ADX > 20 (com penalização se MACD fraco)
+  const trendM15 = trendDirection(cvs('M15'));
+  const m15 = tf('M15');
+  if (trendM15 !== dir) {
     reasons.push(`M15 tendência desalinhada (${trendM15})`);
-} else if (m15.adx <= 18) {
-    reasons.push(`M15 ADX fraco (${m15.adx.toFixed(1)} ≤ 18)`);
-} else {
+  } else if (m15.adx <= 20) {
+    reasons.push(`M15 ADX fraco (${m15.adx.toFixed(1)} ≤ 20)`);
+  } else {
     const m15Phase = m15.macd_phase?.name || '';
     const isWeak = m15Phase.includes('PERDENDO FORÇA');
     console.log(`[DEBUG] M15 Phase: "${m15Phase}", isWeak: ${isWeak}`);
     if (isWeak) {
-        score += 15;
-        reasons.push(`⚠️ M15 alinhado ${dir} mas MACD enfraquecendo (ADX ${m15.adx.toFixed(1)}) → +15 pts`);
+      score += 15;
+      reasons.push(`⚠️ M15 alinhado ${dir} mas MACD enfraquecendo (ADX ${m15.adx.toFixed(1)}) → +15 pts`);
     } else {
-        score += 20;
-        reasons.push(`✅ M15 alinhado ${dir} (ADX ${m15.adx.toFixed(1)})`);
+      score += 20;
+      reasons.push(`✅ M15 alinhado ${dir} (ADX ${m15.adx.toFixed(1)})`);
     }
-}
+  }
 
-// 3. M5: RSI < 45 (CALL) ou > 45 (PUT) — pullback
-const m5 = tf('M5');
-const m5Closes = cvs('M5');
-const m5RsiHist = calcularRSIArray(m5Closes, 14, 3);
-const m5PullbackOk = dir === 'UP'
-  ? m5.rsi < 45 || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] < 45)
-  : m5.rsi > 45 || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] > 45);
-if (!m5PullbackOk) {
-    reasons.push(`M5 RSI sem pullback (${m5.rsi.toFixed(1)})`);
-} else {
+  // 3. M5: pullback dinâmico por tipo de ativo
+  const m5 = tf('M5');
+  const m5Closes = cvs('M5');
+  const m5RsiHist = calcularRSIArray(m5Closes, 14, 3);
+
+  // Buscar limites do ativo na tabela já existente
+  const limiteAtivo = RSI_LIMITS_BY_ASSET[tipoAtivo] || RSI_LIMITS_BY_ASSET.indice_normal;
+
+  // Limiares de pullback (média entre 50 e o extremo correspondente)
+  const pullbackCallMax = Math.floor((50 + limiteAtivo.sobrevenda) / 2);   // ex: 40 para forex
+  const pullbackPutMin  = Math.floor((50 + limiteAtivo.sobrecompra) / 2);  // ex: 60 para forex
+
+  const m5PullbackOk = dir === 'UP'
+    ? m5.rsi < pullbackCallMax || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] < pullbackCallMax)
+    : m5.rsi > pullbackPutMin  || (m5RsiHist.length >= 2 && m5RsiHist[m5RsiHist.length - 2] > pullbackPutMin);
+
+  if (!m5PullbackOk) {
+    reasons.push(`M5 RSI sem pullback (${m5.rsi.toFixed(1)}, limiar ${dir === 'UP' ? pullbackCallMax : pullbackPutMin})`);
+  } else {
     score += 20;
     reasons.push(`✅ M5 pullback (RSI ${m5.rsi.toFixed(1)})`);
-}
+  }
 
-// 4. M1: vela de reversão + RSI a sair de zona crítica (threshold 60 para PUT)
-const m1        = tf('M1');
-const rsiM1     = m1 ? m1.rsi : 50;
-const threshold = dir === 'UP' ? 35 : 60;   // ← alterado para 60
-const reversal  = isReversalCandle(cvs('M1'), dir);
+  // 4. M5: vela de reversão + RSI a sair de zona (thresholds dinâmicos por tipo de ativo)
+  const rsiM5 = m5 ? m5.rsi : 50;
+  const reversal = isReversalCandle(cvs('M5'), dir);
 
-  // Calcula as últimas 3 amostras de RSI(14) a partir dos candles do M1
-  const rsiHistM1  = calcularRSIArray(cvs('M1'), 14, 3);
-  // rsiLeaving verifica se o RSI anterior estava dentro da zona E agora saiu
-  const rsiExited  = rsiHistM1.length >= 2
-    ? rsiLeaving(rsiHistM1, threshold, dir)
-    : (dir === 'UP' ? rsiM1 > threshold : rsiM1 < threshold); // fallback se candles insuficientes
+  // Thresholds de saída de zona: sobrevenda para CALL, sobrecompra para PUT
+  const threshold = dir === 'UP'
+    ? limiteAtivo.sobrevenda      // CALL: RSI precisa sair acima da sobrevenda
+    : limiteAtivo.sobrecompra;    // PUT: RSI precisa cair abaixo da sobrecompra
+
+  const rsiHistM5 = calcularRSIArray(cvs('M5'), 14, 3);
+  const rsiExited = rsiHistM5.length >= 2
+    ? rsiLeaving(rsiHistM5, threshold, dir)
+    : (dir === 'UP' ? rsiM5 > threshold : rsiM5 < threshold);
 
   if (!reversal) {
-    reasons.push(`M1 sem vela de reversão ${dir === 'UP' ? 'altista' : 'baixista'}`);
+    reasons.push(`M5 sem vela de reversão ${dir === 'UP' ? 'altista' : 'baixista'}`);
   } else if (!rsiExited) {
-    reasons.push(`M1 RSI não saiu da zona crítica (atual ${rsiM1.toFixed(0)}, threshold ${threshold})`);
+    reasons.push(`M5 RSI não saiu da zona (atual ${rsiM5.toFixed(0)}, threshold ${threshold})`);
   } else {
     score += 25;
-    reasons.push(`✅ M1 reversão + RSI saiu de zona (${rsiM1.toFixed(0)} > ${threshold})`);
+    reasons.push(`✅ M5 reversão + RSI saiu de zona (${rsiM5.toFixed(0)} vs ${threshold})`);
   }
-  
+
   const finalSignal = score >= 75 ? signalTarget : 'HOLD';
   const confidence  = score >= 75 ? Math.min(score / 100, 0.99) : 0;
   console.log(`🏹 CAÇADOR Score: ${score}/100 → ${finalSignal} (conf ${(confidence * 100).toFixed(0)}%)`);
