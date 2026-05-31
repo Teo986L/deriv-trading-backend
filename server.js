@@ -854,8 +854,8 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
     const isWeak = m15Phase.includes('PERDENDO FORÇA');   // ← alterado
     console.log(`[DEBUG] M15 Phase: "${m15Phase}", isWeak: ${isWeak}`);
     if (isWeak) {
-      score += 10;
-      reasons.push(`⚠️ M15 alinhado ${dir} mas MACD enfraquecendo (ADX ${m15.adx.toFixed(1)}) → +10 pts`);
+      score += 15;
+      reasons.push(`⚠️ M15 alinhado ${dir} mas MACD enfraquecendo (ADX ${m15.adx.toFixed(1)}) → +15 pts`);
     } else {
       score += 20;
       reasons.push(`✅ M15 alinhado ${dir} (ADX ${m15.adx.toFixed(1)})`);
@@ -892,9 +892,9 @@ function calcularScoreCacador(candlesMap, mtfManager, tipoAtivo) {
     score += 25;
     reasons.push(`✅ M1 reversão + RSI saiu de zona (${rsiM1.toFixed(0)} > ${threshold})`);
   }
-
-  const finalSignal = score >= 80 ? signalTarget : 'HOLD';
-  const confidence  = score >= 80 ? Math.min(score / 100, 0.99) : 0;
+  
+  const finalSignal = score >= 75 ? signalTarget : 'HOLD';
+  const confidence  = score >= 75 ? Math.min(score / 100, 0.99) : 0;
   console.log(`🏹 CAÇADOR Score: ${score}/100 → ${finalSignal} (conf ${(confidence * 100).toFixed(0)}%)`);
   return {
     signal: finalSignal,
@@ -952,8 +952,8 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
     const isWeak = m15Phase.includes('PERDENDO FORÇA');   // ← alterado
     console.log(`[DEBUG] M15 Phase: "${m15Phase}", isWeak: ${isWeak}`);
     if (isWeak) {
-      score += 8;
-      reasons.push(`⚠️ M15 pullback (RSI ${m15.rsi.toFixed(1)}) mas MACD enfraquecendo → +8 pts`);
+      score += 12;
+      reasons.push(`⚠️ M15 pullback (RSI ${m15.rsi.toFixed(1)}) mas MACD enfraquecendo → +12 pts`);
     } else {
       score += 15;
       reasons.push(`✅ M15 pullback (RSI ${m15.rsi.toFixed(1)})`);
@@ -981,8 +981,8 @@ function calcularScorePescador(candlesMap, mtfManager, tipoAtivo) {
     reasons.push(`✅ M5 reversão + RSI saiu de zona (${rsiM5.toFixed(0)} > ${thresholdM5})`);
   }
 
-  const finalSignal = score >= 85 ? signalTarget : 'HOLD';
-  const confidence  = score >= 85 ? Math.min(score / 100, 0.99) : 0;
+  const finalSignal = score >= 80 ? signalTarget : 'HOLD';
+  const confidence  = score >= 80 ? Math.min(score / 100, 0.99) : 0;
   console.log(`🎣 PESCADOR Score: ${score}/100 → ${finalSignal} (conf ${(confidence * 100).toFixed(0)}%)`);
   return {
     signal: finalSignal,
